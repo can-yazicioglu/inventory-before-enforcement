@@ -1,0 +1,14 @@
+Inventory Before Enforcement
+Copyright 2026 Can Yazıcıoğlu
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This repository bundles the following third-party file:
+
+  recorder/ibe_recorder/public_suffix_list.dat
+    The Public Suffix List, https://publicsuffix.org/
+    Version 2025-04-07_15-51-09_UTC, commit 5fc8d12c1624ddbc56a80e944aca151a8ee466a1, unmodified.
+    Subject to the terms of the Mozilla Public License, v. 2.0, https://mozilla.org/MPL/2.0/
+
+The recorder runs Zeek (https://zeek.org, BSD licence), which is installed separately and is not
+part of this repository. Third-party datasets used by the analysis are not redistributed here.

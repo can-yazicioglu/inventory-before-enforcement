@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+# data never goes into the repository
+data/
+*.parquet
+*.pcap
+*.pcapng
+*.jsonl.gz
+hmac.key
+armed.json
+devices.csv
+devices_observed.csv
+gateways_seen.json
+unclassified_domains.json
+site.json
