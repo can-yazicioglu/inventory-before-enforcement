@@ -324,6 +324,13 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(st["gateways"], [PZ.device(DEV2)])
         self.assertTrue(all("wh" not in r for r in self.outputs()))      # tokens cannot be switched on from the stick
 
+    def test_low_disk_warning(self):
+        self.arm()
+        st = pipeline.run_once(dict(self.cfg, min_free_gb=10 ** 9), now=NOW)
+        self.assertIn("the data disk is almost full", st["warnings"])
+        st = pipeline.run_once(dict(self.cfg, min_free_gb=0), now=NOW + 3600)
+        self.assertNotIn("the data disk is almost full", st["warnings"])
+
     def test_swap_detection(self):
         p = os.path.join(self.tmp.name, "swaps")
         head = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n"

@@ -574,6 +574,8 @@ def _finish(cfg, st, status_path):
         st["data_free_gb"] = round(usage.f_bavail * usage.f_frsize / 1e9, 2)
     except OSError:
         st["data_free_gb"] = None
+    if st["data_free_gb"] is not None and st["data_free_gb"] < cfg.get("min_free_gb", 2):
+        st.setdefault("warnings", []).append("the data disk is almost full")
     st["rtc_present"] = os.path.exists("/sys/class/rtc/rtc0")
     if disk_swap_on():
         st.setdefault("warnings", []).append("disk swap is on: raw logs in memory could reach the disk")
