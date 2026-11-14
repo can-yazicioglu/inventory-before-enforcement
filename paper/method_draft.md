@@ -66,6 +66,10 @@ Nothing is assumed about the types: they may be dependent, heavy-tailed and infi
 
 **Proposition 1.** Under E, E[N(T+1)] = E[Q_1(T+1)] / (T+1).
 
+This is the incidence form of the classical Good-Turing identity (Good 1953, Robbins 1968, and for
+incidence data Chao and co-authors 2014). We state it for days as sampling units and without any
+assumption on the types, because that is the form the allowlist problem needs.
+
 *Proof.* For t ≤ T+1 let A_t be the number of types observed on day t and on no other of the T+1
 days. Then Q_1(T+1) = Σ_t A_t and N(T+1) = A_{T+1}. Each A_t is the same function of the day sequence
 after day t is moved to the last position, so E[A_t] = E[A_{T+1}] by exchangeability. Summing over t
@@ -86,10 +90,21 @@ total cost of the types seen on exactly one day, each counted on its day.
 with the earlier history, the identity holds with T+1 replaced by W+1 and Q_1 replaced by the number
 of types whose single occurrence lies in the window.
 
-**Alert days.** An alert day is a day with at least one new type. Let D(T) be the number of the first
-T days that carry a type seen on no other of these days. The same argument gives
-P[N(T+1) ≥ 1] = E[D(T+1)]/(T+1). Operators count alert days, not types, so the primary metric of this
-paper is stated in alert days.
+**Proposition 2 (alert days).** An alert day is a day with at least one new type. Let D(T) be the
+number of the first T days that carry a type seen on no other of these days. Under E,
+P[N(T+1) ≥ 1] = E[D(T+1)]/(T+1) ≤ E[D(T)]/T.
+
+*Proof.* Let B_t indicate that day t carries a type seen on no other of the T+1 days. Then
+D(T+1) = Σ_t B_t and B_{T+1} is the indicator of an alert on day T+1. Exchangeability gives the
+identity as in Proposition 1, and the inequality follows as in Corollary 1. ∎
+
+Because a later day can only remove uniqueness from earlier days, D(T+1) ≤ D(T) + 1, hence
+P[N(T+1) ≥ 1] ≤ (E[D(T)] + 1)/(T+1). No independence between types is needed. The same ordering
+argument gives a distribution-free upper prediction bound on the number of new types: the
+⌈(1−α)(T+1)⌉-th smallest of the per-day counts of types unique to their day. This is the standard
+order-statistic prediction bound for exchangeable observations, applied to this problem, not a new
+result. Operators count alert days, not types, so the primary metric of this paper is stated in
+alert days.
 
 **Rule of three.** If no type has been seen exactly once (Q_1 = 0), the nominal 95 percent upper bound
 on the rate is χ²_{0.95}(2)/(2T) ≈ 3/T. A target of 0.1 new types per day cannot be certified in
@@ -178,3 +193,4 @@ nftables kernel path and is a conservative upper bound relative to accelerated d
 - "roughly twice the cost" in Section 8 must be rechecked against current prices.
 - Section 7 will get the measured loss and throughput on the actual device.
 - Related work and the results text are separate files and are not drafted yet.
+- Full bibliographic entries for Good 1953, Robbins 1968 and Chao and co-authors 2014 go into the reference list.
