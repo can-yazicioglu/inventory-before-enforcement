@@ -1,0 +1,26 @@
+name: tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install duckdb pandas numpy scipy pyarrow pyflakes
+      - name: lint
+        run: python -m pyflakes recorder analysis/adapt_recorder.py analysis/tests
+      - name: recorder rules
+        run: python -W error -m unittest discover -s recorder/tests -p 'test_*.py' -v
+      - name: outage rule
+        run: python -W error -m unittest discover -s analysis/tests -p 'test_*.py' -v
+      - name: installer syntax
+        run: bash -n recorder/install.sh

@@ -1,0 +1,180 @@
+# Method section, working draft (14 November 2026)
+
+Status: draft for the paper. Definitions follow `docs/method.md`, which is frozen. Numbers are not
+quoted here. They come from `paper/figures/results_tables.md`, which is generated from the stored tables.
+
+## 1. Setting and threat model
+
+We consider devices that cannot run endpoint security software: embedded devices (IP phones,
+printers, cameras, recorders, storage, medical devices) and vendor-managed PCs that drive medical
+devices. We call them *agentless*. The defender controls a gateway or switch through which the
+device's traffic passes and wants to enforce, per device, an allowlist of connections. Everything
+outside the list raises an alert and is later blocked. The adversary is any party that makes the
+device open or accept a connection it does not normally have: a compromised device reaching out, or
+a compromised neighbour reaching in. We do not address attacks that stay inside allowed connections.
+
+The allowlist is learned by passive observation only. No probe is sent and no device is touched.
+The question of this paper is when the observation may stop.
+
+## 2. Flow types
+
+A **flow type** is one allowlist rule: *transport / role / service port @ peer*.
+
+- *Role* is `out` if the device opens the connection and `in` if it accepts it. Connection logs
+  record the originator. Flow exports do not, so there the role is inferred: port fan-out over the
+  device's trace, then a port below 1024, then equal ports (`sym`), then the recorded initiator, then
+  the lower port.
+- *Service port* is the responder's port. Ports 32768 and above form one class, because they are
+  ephemeral on common systems.
+- Protocols without ports (ICMP, ICMPv6, IGMP and others) are one service per peer.
+- *Peer* depends on the level of detail (Table 1). A LAN peer is always a stable device identity
+  (MAC address or its pseudonym), never an IP address when a MAC address is available.
+
+Table 1. Levels of detail.
+
+| Level | LAN peer | WAN peer | Use |
+|---|---|---|---|
+| proto | scope only | scope only | coarsest baseline |
+| port | scope only | scope only | secondary |
+| **svc** | device identity | any | **primary** |
+| dom | device identity | registered domain if known | where names are available |
+| net | device identity | /24 (IPv4) or /48 (IPv6) | secondary |
+| host | device identity | address | finest baseline |
+
+**Participation filter.** An inbound service counts on a day only if the device took part on that
+day with that peer: it sent payload (flow exports) or the connection was established (connection
+logs). Scans and floods that the device does not answer are not device behaviour and must not be
+learned. Without the filter they would enter the allowlist as rules that admit the scanner.
+
+**Sampling unit.** The unit is a local calendar day on which the device is active. The first and
+the last day of a trace are partial and are dropped, as is any day on which the recorder was down
+for more than one hour inside working hours.
+
+## 3. How many new flow types tomorrow?
+
+Fix a device. Let 𝒮 be the countable set of flow types and X_{j,t} ∈ {0,1} indicate that type j is
+observed on day t. Write D_t = (X_{j,t})_{j∈𝒮} for the observation of day t,
+C_j(T) = Σ_{t≤T} X_{j,t}, Q_k(T) = |{j : C_j(T) = k}| for the number of types seen on exactly k of
+the first T days, and N(T+1) = |{j : C_j(T) = 0, X_{j,T+1} = 1}| for the number of types that are
+new on day T+1. N(T+1) is exactly the number of distinct allowlist violations that enforcement after
+day T would produce on day T+1.
+
+**Assumption E (exchangeable days).** The joint law of (D_1, …, D_{T+1}) is invariant under
+permutations of the days, and E[Σ_j X_{j,1}] < ∞.
+
+Nothing is assumed about the types: they may be dependent, heavy-tailed and infinitely many.
+
+**Proposition 1.** Under E, E[N(T+1)] = E[Q_1(T+1)] / (T+1).
+
+*Proof.* For t ≤ T+1 let A_t be the number of types observed on day t and on no other of the T+1
+days. Then Q_1(T+1) = Σ_t A_t and N(T+1) = A_{T+1}. Each A_t is the same function of the day sequence
+after day t is moved to the last position, so E[A_t] = E[A_{T+1}] by exchangeability. Summing over t
+gives E[Q_1(T+1)] = (T+1) E[N(T+1)]. ∎
+
+**Corollary 1 (the estimate is conservative).** Under E, E[Q_1(T)/T] ≥ E[N(T+1)].
+
+*Proof.* Proposition 1 at length T gives E[Q_1(T)]/T = E[N(T)]. Let M be the number of types observed
+on day T+1 and on none of the days 1, …, T−1. Then M ≥ N(T+1), and swapping days T and T+1 shows
+E[M] = E[N(T)]. ∎
+
+**Corollary 2 (any additive cost).** Let w_{j,t} ≥ 0 be a cost attached to type j on day t (for
+example the number of records that would be blocked) such that the days with their costs are
+exchangeable. Then the expected cost of the types new on day T+1 equals 1/(T+1) times the expected
+total cost of the types seen on exactly one day, each counted on its day.
+
+**Corollary 3 (recent window).** If only the last W+1 days are exchangeable among themselves, jointly
+with the earlier history, the identity holds with T+1 replaced by W+1 and Q_1 replaced by the number
+of types whose single occurrence lies in the window.
+
+**Alert days.** An alert day is a day with at least one new type. Let D(T) be the number of the first
+T days that carry a type seen on no other of these days. The same argument gives
+P[N(T+1) ≥ 1] = E[D(T+1)]/(T+1). Operators count alert days, not types, so the primary metric of this
+paper is stated in alert days.
+
+**Rule of three.** If no type has been seen exactly once (Q_1 = 0), the nominal 95 percent upper bound
+on the rate is χ²_{0.95}(2)/(2T) ≈ 3/T. A target of 0.1 new types per day cannot be certified in
+fewer than 30 days, whatever the device does.
+
+## 4. The stopping rule GT-C
+
+The point estimate of the next-day rate is Q_1(T)/T. GT-C adds two terms:
+
+U(T) = χ²_{0.95}(2(Q_1(T)+1)) / (2T) + [ mean of the last 14 residuals N(t) − Q_1(t−1)/(t−1) ]₊ .
+
+The first term is the upper 95 percent limit of a Poisson mean given the count Q_1(T), per day. It
+is nominal: types appear together, so Q_1 is over-dispersed, and we report empirical coverage rather
+than claim a guarantee. The second term is a prequential drift correction. It is the positive part
+of the average recent error of the estimate, used once at least three errors exist, and it protects
+against a slow violation of assumption E.
+
+**Rule.** Enforce on the first day T ≥ 7 with U(T) ≤ ε. The primary target is ε = 0.3 new flow types
+per day, with 1.0 and 0.1 as secondary targets. A learning episode starts at day 0 of every device
+and, in long traces, again every 21 days.
+
+## 5. Building the allowlist: the complete list of rules
+
+1. Identify each device by its MAC address (clinical sites: by the pseudonym the recorder derives from it). A virtual machine is its own device. Routers are not devices.
+2. Keep connection metadata only: time, transport, ports, sides, bytes, state.
+3. Assign the role and the service port (Section 2). Collapse service ports of 32768 and above.
+4. Label the peer at the chosen level (Table 1). Well-known multicast groups are named. IPv6 solicited-node groups form one class, because their addresses embed bits of the target's address.
+5. Apply the participation filter per device, day, service and peer.
+6. Count each flow type once per active local day. Drop partial days.
+7. Each day compute Q_1(T) and U(T). Stop at the first T ≥ 7 with U(T) ≤ ε.
+8. The allowlist is the set of flow types seen on at least one day of the learning period. As a sensitivity analysis the list is also built from types seen on at least two and at least three different days.
+9. After enforcement a connection outside the list raises an alert. Blocking follows after a grace period (alert, then block).
+10. Fixed observation windows of 7, 14, 21 and 28 days, the quiet streak (3/ε days without a new type) and the recent discovery rate are the comparison rules. They use the same flow types and the same filter.
+
+## 6. Evaluation
+
+For every learning episode that a rule enforces at day T we look at the next 14 active days. The
+**primary metric** is the share of enforced episodes whose alert-day rate in that horizon exceeds ε,
+with a 95 percent interval from a cluster bootstrap over devices. We also report the share of
+episodes that reach enforcement, the median enforcement day, the per-device calibration ratio
+(realised new types over predicted, first episode, T ≥ 7, no smoothing) and the Kaplan-Meier curve of
+the share of devices certified by day T.
+
+Three expectations were written down before the validation data and the clinical data were seen
+(`docs/method.md`): calibration near or below 1 in control and clinical networks, GT-C exceedance
+below 10 percent, and fixed windows clearly worse at the net level. They are reported as they turn
+out.
+
+All stored tables were reproduced from scratch and recomputed by a second implementation written
+from the method text alone, with sets and loops instead of matrices.
+
+## 7. Recording at clinical sites
+
+Recording at a site uses a purpose-built recorder (`recorder/`). It listens on switch mirror ports
+(incoming traffic of every port, so each frame is seen once), runs one Zeek process per port and
+keeps raw logs in memory only. Once an hour it turns the connection log into anonymised records and
+deletes the raw logs. Local devices are named by HMAC-SHA256 pseudonyms of their MAC addresses. The
+key is generated on the device at the site, lives on a removable stick that stays with the site's IT
+officer and is never available to the researchers. Remote hosts are never named: they carry a
+coarse service type and, where the site's written permission covers it, one-way tokens of the
+address, its network and its registrable domain. Records pass a field whitelist and a scan for
+address shapes before they are written. The recorder cannot transmit on its capture ports, starts
+only after an approval reference has been entered on site, and stops by itself after the permitted
+number of recording days.
+
+The chain from packets to the stopping rule was verified on a public capture replayed as identical
+days, where the correct answers are known in advance (`recorder/README.md`).
+
+## 8. Platform selection
+
+The recorder and the enforcement gateway share one hardware design: a Raspberry Pi 5 (quad-core
+Cortex-A76, 8 GB) with a dual-port RTL8125 Ethernet adapter on its single PCIe 2.0 lane. We required
+at least two non-USB capture ports, a battery-backed clock for offline operation, hardware AES for
+encrypted storage, the ability to disable all radios, a documented production lifetime, and a cost
+low enough for a small clinic. Microcontrollers were excluded because they cannot run a Linux network
+stack or Zeek. FPGA platforms such as NetFPGA SUME target 10 Gb/s and above and would add cost and
+development effort without benefit at the 1 Gb/s links we study. The earlier Raspberry Pi 4 offers
+neither an accessible PCIe lane nor an on-board clock. Fanless x86 appliances with four Intel I226
+ports are the more capable recorder and remain our scale-up path for larger hospital networks, at
+roughly twice the cost. Neither the on-board Ethernet driver of the Raspberry Pi 5 (macb) nor the
+RTL8125 driver (r8169) supports native XDP, so the enforcement cost we report is that of the portable
+nftables kernel path and is a conservative upper bound relative to accelerated data planes.
+
+## Open points before submission
+
+- "roughly twice the cost" in Section 8 must be rechecked against current prices.
+- Section 7 will get the measured loss and throughput on the actual device.
+- Related work and the results text are separate files and are not drafted yet.

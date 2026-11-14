@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below. A paper is in preparation and this file will point to it."
+title: "Inventory before enforcement: passive measurement, a stopping rule and an anonymising recorder for per-device allowlists"
+type: software
+authors:
+  - family-names: "Yazıcıoğlu"
+    given-names: "Can"
+license: Apache-2.0
+version: "0.2.0"
+date-released: "2026-11-14"
+keywords:
+  - network segmentation
+  - allowlist
+  - medical devices
+  - Good-Turing
+  - passive measurement
+  - anonymisation
