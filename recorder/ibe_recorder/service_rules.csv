@@ -1,0 +1,28 @@
+# registrable domain suffix, category
+# Categories are coarse service types. Site-specific rules go in service_rules.csv on the key stick.
+windowsupdate.com,os_update
+update.microsoft.com,os_update
+msftconnecttest.com,connectivity_check
+msftncsi.com,connectivity_check
+gstatic.com,connectivity_check
+apple.com,vendor_cloud
+ubuntu.com,os_update
+debian.org,os_update
+ntp.org,time
+time.windows.com,time
+time.google.com,time
+teamviewer.com,remote_access
+anydesk.com,remote_access
+alpemix.com,remote_access
+logmein.com,remote_access
+hp.com,vendor_cloud
+hpeprint.com,vendor_cloud
+canon.com,vendor_cloud
+epson.com,vendor_cloud
+brother.com,vendor_cloud
+kyoceradocumentsolutions.com,vendor_cloud
+hikvision.com,vendor_cloud
+hik-connect.com,vendor_cloud
+dahuasecurity.com,vendor_cloud
+yealink.com,vendor_cloud
+grandstream.com,vendor_cloud

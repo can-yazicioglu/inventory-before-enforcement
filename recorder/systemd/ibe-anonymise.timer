@@ -1,0 +1,11 @@
+[Unit]
+Description=IBE recorder: hourly anonymisation
+
+[Timer]
+# seven minutes past every hour, after Zeek has rotated its logs, and once shortly after boot
+OnCalendar=*:07
+OnBootSec=3min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,13 @@
+{
+ "site": "A",
+ "interfaces": ["eth1", "eth2"],
+ "raw_dir": "/run/ibe/raw",
+ "data_dirs": ["/mnt/ibe-data/anon", "/var/lib/ibe/anon"],
+ "key_dir": "/mnt/ibe-key",
+ "state_dir": "/var/lib/ibe",
+ "auto_init_key": true,
+ "wan_tokens": false,
+ "max_recording_days": 112,
+ "timezone": "Europe/Istanbul",
+ "led": "/sys/class/leds/ACT"
+}

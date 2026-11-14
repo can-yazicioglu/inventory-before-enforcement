@@ -1,0 +1,7 @@
+[Unit]
+Description=IBE recorder: anonymise the last hour and delete the raw logs
+
+[Service]
+Type=oneshot
+Environment=PYTHONPATH=/opt/ibe
+ExecStart=/usr/bin/python3 -m ibe_recorder --config /etc/ibe/config.json run
