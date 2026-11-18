@@ -43,6 +43,8 @@ if [ ! -x /opt/zeek/bin/zeek ]; then
     apt-get install -y --no-install-recommends zeek-8.0-core
 fi
 /opt/zeek/bin/zeek --version
+# firmware patches for Realtek network chips (RTL8125 on the PCIe adapter). Already present on Raspberry Pi OS.
+apt-get install -y --no-install-recommends firmware-realtek || echo "firmware-realtek not available, continuing"
 
 echo "== recorder files"
 install -d -m 0755 /opt/ibe /opt/ibe/zeek /etc/ibe
@@ -93,11 +95,12 @@ if [ -d /etc/NetworkManager/conf.d ]; then
     printf '[keyfile]\nunmanaged-devices=%s\n' "${UNMANAGED%;}" > /etc/NetworkManager/conf.d/90-ibe-unmanaged.conf
 fi
 
-echo "== radios off, clock battery charging on (Raspberry Pi 5)"
+echo "== radios off, clock battery charging on, PCIe connector on (Raspberry Pi 5)"
 rfkill block all 2>/dev/null || true
 CFG=/boot/firmware/config.txt
 if [ -f "$CFG" ]; then
-    for line in dtoverlay=disable-wifi dtoverlay=disable-bt dtparam=rtc_bbat_vchg=3000000; do
+    # pciex1: the PCIe connector is off by default unless a HAT+ with an ID EEPROM is attached
+    for line in dtoverlay=disable-wifi dtoverlay=disable-bt dtparam=rtc_bbat_vchg=3000000 dtparam=pciex1; do
         grep -qx "$line" "$CFG" || echo "$line" >> "$CFG"
     done
 fi

@@ -19,6 +19,11 @@ Neither the on-board Ethernet driver of the Raspberry Pi 5 (macb) nor the RTL812
 supports native XDP. The enforcement cost reported in the study is therefore that of the portable
 nftables kernel path, a conservative upper bound relative to accelerated data planes.
 
+The adapter is a PCIe packet switch with two RTL8125 controllers (boards of this design are sold by
+several vendors). The in-kernel r8169 driver of the Raspberry Pi kernel handles the RTL8125A, B and D
+variants (branch rpi-6.12.y), so no vendor driver is installed. The PCIe connector must be switched on
+with `dtparam=pciex1`, which the installer does.
+
 The software has no board-specific code. It needs Linux (arm64 or amd64), Python 3.11 or later
 (standard library only, tested with 3.11, 3.12 and 3.13), Zeek 8.0, nftables and one network
 interface per mirror port.
