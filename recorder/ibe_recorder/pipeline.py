@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 
 from . import core
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 MIN_EPOCH = 1793491200          # 2026-11-01 UTC. A clock before this date was never set.
 DEFAULTS = {
     "site": "A",
@@ -41,6 +41,8 @@ DEFAULTS = {
     "auto_init_key": False,
     "dedup_window_s": 2,
     "sysfs_net": "/sys/class/net",
+    "proc_swaps": "/proc/swaps",
+    "export_recipient": "",
     "led": "",
 }
 ACTIVE = {"conn.log", "dns.log", "ssl.log", "capture_loss.log", "stats.log"}
@@ -380,6 +382,43 @@ def disk_swap_on(path="/proc/swaps"):
         return False
 
 
+def encrypt_exports(cfg, only=None):
+    """Encrypt the anonymised files for the researchers' public key into the folder 'export'.
+
+    The folder sits next to the first data directory. Each file is encrypted once, the three small
+    summary files are refreshed every run. Only the holder of the private key can read the result,
+    so the folder can travel by any channel. Returns (files encrypted, error text or None).
+    """
+    key = cfg.get("export_recipient")
+    src = cfg["data_dirs"][0]
+    if not key or not os.path.exists(key) or not os.path.isdir(src):
+        return 0, None
+    dst = os.path.join(os.path.dirname(src.rstrip("/")), "export")
+    home = os.path.join(cfg["raw_dir"], ".gnupg")
+    os.makedirs(dst, exist_ok=True)
+    os.makedirs(home, mode=0o700, exist_ok=True)
+    fresh, n = ("status.json", "devices.json", "coverage.jsonl"), 0
+    for name in sorted(os.listdir(src)):
+        if only is not None and name not in only:
+            continue
+        if not (name in fresh or (name.startswith("anon-") and name.endswith(".gz"))):
+            continue
+        out = os.path.join(dst, name + ".gpg")
+        if os.path.exists(out) and name not in fresh:
+            continue
+        try:
+            r = subprocess.run(["gpg", "--batch", "--yes", "--no-options", "--homedir", home, "--trust-model", "always",
+                                "--recipient-file", key, "--output", out + ".tmp", "--encrypt", os.path.join(src, name)],
+                               capture_output=True, text=True)
+        except OSError as e:
+            return n, f"gpg cannot be run: {e.strerror}"
+        if r.returncode:
+            return n, "gpg refused the key or the file"
+        os.replace(out + ".tmp", out)
+        n += 1
+    return n, None
+
+
 def set_led(cfg, state):
     """Best effort health light: heartbeat while recording, solid when ready, fast blink when stopped."""
     led = cfg.get("led")
@@ -577,8 +616,15 @@ def _finish(cfg, st, status_path):
     if st["data_free_gb"] is not None and st["data_free_gb"] < cfg.get("min_free_gb", 2):
         st.setdefault("warnings", []).append("the data disk is almost full")
     st["rtc_present"] = os.path.exists("/sys/class/rtc/rtc0")
-    if disk_swap_on():
+    if disk_swap_on(cfg.get("proc_swaps", "/proc/swaps")):
         st.setdefault("warnings", []).append("disk swap is on: raw logs in memory could reach the disk")
+    try:
+        done, err = encrypt_exports(cfg)
+        st["export_encrypted"] = st.get("export_encrypted", 0) + done
+        if err:
+            st.setdefault("warnings", []).append("export encryption failed: " + err)
+    except OSError as e:
+        st.setdefault("warnings", []).append(f"export encryption failed: {e.strerror}")
     blob = json.dumps(st, indent=1, sort_keys=True).encode()
     if core.scan_text(blob.decode()):          # the status file leaves the site too
         blob = json.dumps({"version": VERSION, "state": "status withheld by leak scan",
@@ -591,5 +637,9 @@ def _finish(cfg, st, status_path):
             _write_atomic(p, blob)
         except OSError:
             pass
+    try:
+        encrypt_exports(cfg, only=("status.json",))        # the copy in 'export' shows the status just written
+    except OSError:
+        pass
     set_led(cfg, st["state"])
     return st

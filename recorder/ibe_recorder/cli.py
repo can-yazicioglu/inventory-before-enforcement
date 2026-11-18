@@ -72,13 +72,21 @@ def cmd_extend(cfg, args):
 
 
 def cmd_export(cfg, args):
-    """Copy the anonymised files to a folder (for example a USB stick) with a checksum list."""
+    """Copy the data to a folder (for example a USB stick) with a checksum list.
+
+    If an export key is configured the encrypted folder 'export' is copied, otherwise the anonymised files.
+    """
     src = next((d for d in cfg["data_dirs"] if os.path.isdir(d)), None)
     if src is None:
         sys.exit("no data directory found")
+    enc = os.path.join(os.path.dirname(src.rstrip("/")), "export")
+    if cfg.get("export_recipient") and os.path.isdir(enc):
+        pipeline.encrypt_exports(cfg)
+        src, names = enc, sorted(n for n in os.listdir(enc) if n.endswith(".gpg"))
+    else:
+        names = sorted(n for n in os.listdir(src)
+                       if (n.startswith("anon-") and n.endswith(".gz")) or n in ("status.json", "devices.json", "coverage.jsonl"))
     os.makedirs(args.dest, exist_ok=True)
-    names = sorted(n for n in os.listdir(src)
-                   if (n.startswith("anon-") and n.endswith(".gz")) or n in ("status.json", "devices.json", "coverage.jsonl"))
     with open(os.path.join(args.dest, "SHA256SUMS"), "w", encoding="ascii") as sums:
         for n in names:
             shutil.copy2(os.path.join(src, n), os.path.join(args.dest, n))

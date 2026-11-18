@@ -52,6 +52,7 @@ to map a remote address to a service type, and are discarded.
 | Free text cannot leak through device labels | type, group and visibility come from a fixed vocabulary. Brand and model are limited to 40 plain characters and scanned | `test_full_run` |
 | Recording cannot start before ethics approval | capture needs an arm file that names the approval. Without it nothing is captured and RAM is kept empty | `test_not_armed_writes_nothing_and_keeps_nothing` |
 | Recording cannot run longer than permitted | permanent stop after `max_recording_days` (default 112). Records of a later day are dropped, not written | `test_limit_is_exact_and_permanent` |
+| Data in transit is unreadable to third parties | every anonymised file is also encrypted for the researchers' OpenPGP public key into the folder `export`. The private key never comes near the device | `test_export_is_encrypted_for_the_researcher` |
 | The recorder cannot disturb the network | capture interfaces have no address, no ARP and no IPv6, and an nftables egress rule drops every outgoing frame. The capture service does not start if the rule cannot be loaded | `egress_block.py` |
 
 ## Results of the tests on real traffic
@@ -125,7 +126,7 @@ Then, at the site:
 3. Connect the mirror ports. Nothing is captured yet.
 4. After ethics approval, put a file `armed.json` on the key stick: `{"approval_ref": "<date and number>"}`. Capture starts within the hour.
 5. After a few days, copy `devices_observed.csv` from the key stick, fill in type, brand, model, group, visibility and switch for each row, and save it on the stick as `devices.csv`. The file holds real addresses and never leaves the stick. Only the labels are exported, attached to pseudonyms.
-6. To hand over data, copy the folder `anon` from the data disk. It holds no address and no name.
+6. To hand over data, copy the folder `export` from the data disk and send it by any channel. It holds the same anonymised files, encrypted so that only the researchers can open them. The folder `anon` next to it is the readable form, kept so that the site can inspect what leaves.
 
 Optional files on the key stick: `site.json` (`{"gateway_macs": [...], "local_nets": [...]}`) and
 `service_rules.csv` (`domain,category` lines for vendor domains the built-in rules do not know).

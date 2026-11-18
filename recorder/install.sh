@@ -51,6 +51,10 @@ rm -rf /opt/ibe/ibe_recorder
 cp -r "$HERE/ibe_recorder" /opt/ibe/ibe_recorder
 find /opt/ibe -name __pycache__ -prune -exec rm -rf {} +
 install -m 0644 "$HERE/zeek/ibe.zeek" /opt/ibe/zeek/ibe.zeek
+# the researchers' public key: exports are encrypted for it, the private key never comes near the device
+if [ -f "$HERE/recipient.asc" ]; then
+    install -m 0644 "$HERE/recipient.asc" /etc/ibe/recipient.asc
+fi
 if [ ! -f /etc/ibe/config.json ]; then
     IFACES=$(printf '"%s", ' "$@"); IFACES="[${IFACES%, }]"
     sed "s/\"interfaces\": .*/\"interfaces\": ${IFACES},/" "$HERE/config.example.json" > /etc/ibe/config.json

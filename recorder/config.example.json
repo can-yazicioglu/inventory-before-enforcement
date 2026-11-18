@@ -8,6 +8,7 @@
  "auto_init_key": true,
  "wan_tokens": false,
  "max_recording_days": 112,
+ "export_recipient": "/etc/ibe/recipient.asc",
  "timezone": "Europe/Istanbul",
  "led": "/sys/class/leds/ACT"
 }

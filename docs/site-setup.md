@@ -7,6 +7,7 @@ The site's IT officer connects it, holds the key stick and hands over the anonym
 
 All of these produce numbers that go into the paper. Run them on the actual device.
 
+0. **Export key.** On your own computer: `gpg --quick-generate-key ibe-export default default never`, then `gpg --armor --export ibe-export > recorder/recipient.asc`. The installer copies this public key to the device. The private key stays with you. Back it up: without it the encrypted exports cannot be opened.
 1. **Install** on a fresh 64-bit Raspberry Pi OS or Debian 12/13: `sudo recorder/install.sh eth1 eth2`, reboot.
 2. **Functional tests on the device**: the unit tests, `tests/e2e.py` with any capture file shorter than a day, `tests/egress_block.py`.
 3. **Loss and speed.** Replay public captures into both capture ports through a mirroring switch at 100, 300, 600 and 1000 Mbit/s. Record Zeek's packet loss and the CPU load. `coverage.jsonl` holds the packet and drop counters.
@@ -38,9 +39,10 @@ set according to the site's written permission, and no key stick content.
 | `switch` | a letter for the switch the device is connected to |
 
 6. Look at the status light once a week. If it blinks fast, read `status.json` on the key stick.
-7. To hand over data, copy the folder `anon` from the data disk outside working hours. The recorder keeps a second copy and refills the disk afterwards.
+7. To hand over data, copy the folder `export` (encrypted) from the data disk outside working hours and send it. The recorder keeps a second copy and refills the disk afterwards.
 8. At the end, keep or destroy the key stick. Without it the pseudonyms cannot be linked to devices by anyone.
 
 ## What the researcher receives
 
-`anon-*.jsonl.gz`, `devices.json`, `coverage.jsonl`, `status.json`. Nothing else leaves the site.
+`anon-*.jsonl.gz`, `devices.json`, `coverage.jsonl`, `status.json`, each encrypted (`.gpg`). Nothing else leaves the site.
+Decrypt with `gpg --decrypt-files export/*.gpg`.

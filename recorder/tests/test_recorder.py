@@ -3,6 +3,8 @@
 import gzip
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -126,7 +128,8 @@ class PipelineTests(unittest.TestCase):
         t = self.tmp.name
         self.cfg = dict(pipeline.DEFAULTS, raw_dir=f"{t}/raw", data_dirs=[f"{t}/ssd/anon", f"{t}/sd/anon"],
                         key_dir=f"{t}/key", state_dir=f"{t}/state", manage_services=False,
-                        gateway_macs=[GW], interfaces=["eth1", "eth2"], sysfs_net=f"{t}/sys")
+                        gateway_macs=[GW], interfaces=["eth1", "eth2"], sysfs_net=f"{t}/sys",
+                        proc_swaps=f"{t}/no-swaps")
         for d in ("raw/eth1", "raw/eth2", "key", "state", "sys/eth1/statistics", "sys/eth2/statistics"):
             os.makedirs(f"{t}/{d}")
         with open(f"{t}/key/hmac.key", "w") as f:
@@ -323,6 +326,38 @@ class PipelineTests(unittest.TestCase):
         st = pipeline.run_once(dict(self.cfg, gateway_macs=[]), now=NOW)
         self.assertEqual(st["gateways"], [PZ.device(DEV2)])
         self.assertTrue(all("wh" not in r for r in self.outputs()))      # tokens cannot be switched on from the stick
+
+    @unittest.skipUnless(shutil.which("gpg"), "gpg is not installed")
+    def test_export_is_encrypted_for_the_researcher(self):
+        home = os.path.join(self.tmp.name, "researcher")           # stands for the researcher's own computer
+        os.makedirs(home, mode=0o700)
+        gpg = ["gpg", "--batch", "--yes", "--homedir", home, "--pinentry-mode", "loopback", "--passphrase", ""]
+        subprocess.run(gpg + ["--quick-generate-key", "ibe-test", "default", "default", "never"], check=True,
+                       capture_output=True)
+        pub = os.path.join(self.tmp.name, "recipient.asc")
+        subprocess.run(gpg + ["--armor", "--output", pub, "--export", "ibe-test"], check=True, capture_output=True)
+        self.fill()
+        self.arm()
+        cfg = dict(self.cfg, export_recipient=pub)
+        st = pipeline.run_once(cfg, now=NOW)
+        self.assertEqual([w for w in st["warnings"] if "export" in w], [])
+        exp = os.path.join(self.tmp.name, "ssd", "export")
+        plain = sorted(os.listdir(cfg["data_dirs"][0]))
+        self.assertEqual(sorted(os.listdir(exp)), sorted(n + ".gpg" for n in plain))
+        anon = [n for n in plain if n.startswith("anon-")][0]
+        with open(os.path.join(exp, anon + ".gpg"), "rb") as f:
+            cipher = f.read()
+        with open(os.path.join(cfg["data_dirs"][0], anon), "rb") as f:
+            clear = f.read()
+        self.assertNotIn(clear[:24], cipher)
+        back = subprocess.run(gpg + ["--decrypt", os.path.join(exp, anon + ".gpg")], check=True, capture_output=True)
+        self.assertEqual(back.stdout, clear)                        # only the private key opens it
+        first = os.path.getmtime(os.path.join(exp, anon + ".gpg"))
+        pipeline.run_once(cfg, now=NOW + 3600)
+        self.assertEqual(os.path.getmtime(os.path.join(exp, anon + ".gpg")), first)   # encrypted once
+        bad = dict(cfg, export_recipient=os.path.join(self.cfg["key_dir"], "hmac.key"))  # not a public key
+        st = pipeline.run_once(bad, now=NOW + 7200)
+        self.assertIn("export encryption failed: gpg refused the key or the file", st["warnings"])
 
     def test_low_disk_warning(self):
         self.arm()
