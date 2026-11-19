@@ -8,7 +8,7 @@ The site's IT officer connects it, holds the key stick and hands over the anonym
 All of these produce numbers that go into the paper. Run them on the actual device.
 
 0. **Export key.** On your own computer: `gpg --quick-generate-key ibe-export default default never`, then `gpg --armor --export ibe-export > recorder/recipient.asc`. The installer copies this public key to the device. The private key stays with you. Back it up: without it the encrypted exports cannot be opened.
-1. **Install** on a fresh 64-bit Raspberry Pi OS or Debian 12/13: `sudo recorder/install.sh eth1 eth2`, reboot.
+1. **Install** on a fresh 64-bit Raspberry Pi OS or Debian 12/13: `sudo recorder/install.sh eth1 eth2`, reboot. For a site with three mirrored switches the built-in port is the third capture port (`sudo recorder/install.sh eth0 eth1 eth2`, from the keyboard and screen). Then run tests 3 and 4 with all three ports in use.
 2. **Functional tests on the device**: the unit tests, `tests/scenarios.py`, `tests/e2e.py` with any capture file shorter than a day, `tests/egress_block.py`, `tests/live_veth.py`, `tests/batch_size.py`.
 3. **Loss and speed.** Replay public captures into both capture ports through a mirroring switch at 100, 300, 600 and 1000 Mbit/s. Record Zeek's packet loss and the CPU load. `coverage.jsonl` holds the packet and drop counters.
 4. **72 hours without a break.** Pull the power plug several times. Recording must resume by itself and the files must stay readable.
@@ -44,7 +44,7 @@ the key of that recording.
 
 ## At the site (IT officer)
 
-1. Place the recorder next to the switches. Connect power. Do not connect its built-in network port to anything.
+1. Place the recorder next to the switches. Connect power. Do not connect its built-in network port to anything, unless it was prepared as the third capture port.
 2. On each managed switch, mirror incoming traffic of every port to a free port and connect that port to one capture port of the recorder (see `recorder/README.md`).
 3. Plug in the key stick (FAT32, label `IBE-KEY`) and the data disk (exFAT, label `IBE-DATA`).
 4. Wait for the written notice that ethics approval has been granted. Only then copy `armed.json` to the key stick.

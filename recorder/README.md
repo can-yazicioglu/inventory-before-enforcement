@@ -126,6 +126,7 @@ that is silent around midnight):
 | Two VLANs joined by a router that is not listed and leads nowhere else, every frame captured twice | both devices keep their own names in both directions, also for an attempt that is not answered. The router is recognised and has one name |
 | Roles from the port rules for every record (sensitivity analysis) | the same flow types, except that equal ports on both sides are called symmetric |
 | Two capture ports | the same records and flow types as one |
+| Three capture ports, every conversation seen on all three | the same records and flow types as one |
 | Every frame doubled, as when a switch mirrors both directions | the same flow types. Packet counts double |
 | Every raw record written or counted, raw logs deleted after every run, no address in the output | pass |
 | The same test with the recorder as it was before the first round of reviews | fails: 17 unexpected and 23 missing flow types |
@@ -218,6 +219,7 @@ Label them `partial` in the device table.
 
 ```bash
 sudo ./install.sh eth1 eth2        # the capture interfaces, never the one you are logged in through
+                                   # (a third mirrored switch takes the built-in port: eth0 eth1 eth2)
 sudo reboot
 ```
 

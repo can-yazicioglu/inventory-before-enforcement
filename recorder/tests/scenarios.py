@@ -546,6 +546,13 @@ def main():
     got2, _ = flow_types(os.path.join(a.work, "two"), cfg2)
     check("two capture ports give the same flow types", got2 == want)
 
+    # three switches, each mirrored to a port of its own: a conversation that crosses all of them is seen three times
+    cfg5, st5, _, _, _, _ = chain(a.zeek, os.path.join(a.work, "three"), ifaces=("eth0", "eth1", "eth2"))
+    check("three capture ports give the records of one", strip(outputs(cfg5)) == strip(recs)
+          and st5["records_dropped"]["duplicate"] == 2 * n_raw, f"duplicates removed {st5['records_dropped']['duplicate']}")
+    got5, _ = flow_types(os.path.join(a.work, "three"), cfg5)
+    check("three capture ports give the same flow types", got5 == want)
+
     cfg3, st3, _, _, n3, _ = chain(a.zeek, os.path.join(a.work, "double"), double=True)
     got3, _ = flow_types(os.path.join(a.work, "double"), cfg3)
     recs3 = [r for r in outputs(cfg3) if not r.get("open")]
