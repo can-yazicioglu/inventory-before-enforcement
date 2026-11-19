@@ -39,31 +39,39 @@ The full definitions, the parameters and the three expectations written down in 
 
 ```bash
 pip install duckdb pandas numpy scipy pyarrow
-python3 -m unittest discover -s recorder/tests -p 'test_*.py'      # recorder rules
-python3 -m unittest discover -s analysis/tests -p 'test_*.py'      # outage rule
+python3 -m unittest discover -s recorder/tests -p 'test_*.py'      # recorder rules, installer
+python3 -m unittest discover -s analysis/tests -p 'test_*.py'      # outage rule, roles, hourly reports
 ```
 
-With Zeek 8.0 installed and any capture file of less than a day:
+With Zeek 8.0 installed:
 
 ```bash
-python3 recorder/tests/e2e.py --pcap capture.pcap --work /tmp/ibe-e2e
+python3 recorder/tests/scenarios.py --work /tmp/ibe-scenarios
+python3 recorder/tests/e2e.py --pcap capture.pcap --work /tmp/ibe-e2e      # any capture of less than a day
 ```
 
-This replays the capture as 30 identical days through Zeek, the recorder, the adapter and the
-analysis, and checks answers that are known in advance: nothing identifying leaves the recorder,
-every record is accounted for, two mirror ports give the same records as one, the flow types equal
-an independent computation, and GT-C stops on day 10 for ε = 0.3 on every device.
+`scenarios.py` builds a capture by hand with one case for every situation that a connection log
+gets wrong unless it is handled on purpose (a connection open for 50 hours, one that never closes,
+one picked up in the middle with the server speaking first, 20 minutes of silence, a slow answer,
+refusals, midnight) and checks that the chain gives exactly the flow types written down beforehand
+for every device and day.
+
+`e2e.py` replays a real capture as 30 identical days through Zeek, the recorder, the adapter and
+the analysis, and checks answers that are known in advance: nothing identifying leaves the
+recorder, every record is accounted for, two mirror ports give the same records as one, the flow
+types equal an independent computation, and GT-C stops on day 10 for ε = 0.3 on every device.
 
 ## Privacy by construction
 
 The recorder is built so that the researchers never hold identifying data.
 
-- Raw logs exist only in RAM and are deleted every hour, whether or not the hour could be written.
+- Raw logs exist only in RAM and are deleted every hour, whether or not the hour could be written. The recorder refuses to record if its log directory is not a RAM disk or if any swap could move memory to a disk.
 - Local devices are named by HMAC-SHA256 pseudonyms. The key is created on site, lives on a USB stick that stays there, and is never copied. Pulling the stick stops the recording.
 - Remote hosts are never named. They carry a coarse service type and, only where the site's written permission covers it, one-way tokens.
 - No packet contents, URLs, user names or host names are kept.
 - Every record passes a field whitelist, and every output file passes a scan for anything shaped like an address.
 - Capture ports cannot transmit: a kernel rule drops every outgoing frame.
+- Recording starts only after the ethics approval reference has been entered on site, and stops by itself after the permitted number of days.
 
 Details and the tests behind each statement: [`recorder/README.md`](recorder/README.md).
 

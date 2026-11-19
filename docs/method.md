@@ -95,3 +95,24 @@ No parameter changes. These are the operational forms of terms already fixed.
 6. *Remote peers without permission for pseudonyms.* The remote peer is labelled by a coarse service type only. The svc level does not use it.
 7. *Recording limit.* The recorder stops by itself after the permitted number of recording days and drops records of any later day.
 8. *Group addresses.* Addresses must not leave the site, so the recorder names well-known multicast groups by a fixed word, gives every other group a keyed pseudonym, and collapses IPv6 solicited-node groups into one class (their addresses embed bits of the target's address). In the public data each group address is its own peer. The difference can only lower the number of flow types at a clinical site and applies to every rule alike.
+
+**19 November 2026, audit of the recorder (before any clinical data).** Estimate, rule, primary
+metric and the three expectations unchanged. The audit found cases in which a connection log
+misstates which flow types a device has. The operational definitions of 14 November are completed
+as follows. The public data are flow exports with roles from the port rules and are not affected.
+
+1. *Connections that stay open.* Zeek writes a connection record when the connection ends and stamps it with its start. A connection that lasts for days would count on its first day only, and not at all if it was open before recording started or is still open when recording stops. The recorder therefore also reports every connection that is still open, once for every hour in which it carried packets, stamped with the time of the last packet. A flow type is present on a day if a connection of that type started on that day or an open connection of that type carried packets on that day. The bytes of the hourly reports are not added. Resolution: a connection shorter than one hour that crosses midnight counts on its first day only.
+2. *Silence inside a connection.* By default Zeek forgets a TCP connection after 5 minutes without packets and a UDP flow after 1 minute. When packets resume it starts a new record, and the side that speaks first becomes the originator. The recorder keeps a silent TCP connection for one day (longer than the 2 hour keep-alive default of common operating systems) and a silent UDP flow for 2 minutes (the gap that splits flows in the preparation of the public packet traces).
+3. *Handshake not seen.* A TCP record that contains neither the originator's SYN nor the responder's SYN-ACK was picked up in the middle of a conversation (start of the recording, restart of the capture, silence longer than a day). Its originator is only the side that happened to speak first. For such a record the role is decided by the rules for flow exports (port fan-out, then a port below 1024, then equal ports, then the lower port), and the record counts for a device only if that device sent a packet in it other than a reset.
+4. *Established, TCP (replaces the TCP part of point 2 of 14 November).* The responder took part if it sent a SYN-ACK, an acknowledgement, data or a FIN (Zeek history letters `h`, `a`, `d`, `f`). A reset alone is a refusal. Before, only the SYN-ACK counted, which dropped the responder of every connection whose handshake was not seen. In an hourly report the responder must also have sent a packet in that hour.
+5. *Sensitivity analysis registered for clinical sites.* Every result is also computed with roles from the port rules for every record (the recorded originator only breaks ties). One difference is known in advance: a unicast answer to a multicast or broadcast question is a flow of its own, which the answering device opens towards the asker's client port. The port rules call it a service of the answering device once several askers have been seen.
+6. *Duplicates across capture ports* are removed within one hourly batch. A copy that falls into the next batch is kept. This does not change which flow types are present.
+7. *Records stamped by an unset clock* (before November 2026 or more than a day ahead of the device clock) are dropped and counted.
+
+Effect on the test capture (CICIoMT2024 benign, 22.1 hours, 27 devices, svc level): 188 pairs of
+device and flow type instead of 192. The four that disappeared were artefacts. Two servers appeared
+to open connections to a client port (records picked up after a silence in which the server spoke
+first). One device was credited with a connection to a remote mail port in which it had sent no
+packet. One unanswered keep-alive, sent every two hours, had been cut into separate records, the
+last of which carried another MAC address for the same peer IP address. With the default timeouts
+202 of 2,979 TCP records in that capture had no handshake.

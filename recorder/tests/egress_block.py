@@ -5,19 +5,20 @@
 
 A virtual cable is created, 20 raw Ethernet frames are sent into one end and counted at the other,
 first without the rule, then with it, then with the rule loaded a second time (it must be safe to
-load twice). Needs root, iproute2 and nftables. Usage: egress_block.py
+load twice). The rule is the file that install.sh writes for that interface, not a copy of it.
+Needs root, iproute2 and nftables. Usage: egress_block.py
 """
+import os
 import socket
 import subprocess
+import sys
+import tempfile
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from test_installer import fake_install  # noqa: E402
+
 A, B = "ibet0", "ibet1"
-RULE = f"""table netdev ibe_{B}
-delete table netdev ibe_{B}
-table netdev ibe_{B} {{
-    chain out {{ type filter hook egress device "{B}" priority 0; policy drop; }}
-}}
-"""
 
 
 def sh(*cmd, check=True, text=None):
@@ -43,6 +44,12 @@ def arrived(n=20):
 
 
 def main():
+    with tempfile.TemporaryDirectory() as root:              # let the installer write its rule file
+        r = fake_install(root, [B])
+        if r.returncode:
+            raise SystemExit("install.sh failed: " + r.stdout[-300:] + r.stderr[-300:])
+        with open(os.path.join(root, "etc", "ibe", f"egress-{B}.nft"), encoding="utf-8") as f:
+            rule = f.read()
     sh("ip", "link", "del", A, check=False)
     sh("ip", "link", "add", A, "type", "veth", "peer", "name", B)
     try:
@@ -51,9 +58,9 @@ def main():
             sh("ip", "link", "set", i, "up", "arp", "off")
         time.sleep(1)
         free = arrived()
-        sh("nft", "-f", "-", text=RULE)
+        sh("nft", "-f", "-", text=rule)
         blocked = arrived()
-        sh("nft", "-f", "-", text=RULE)
+        sh("nft", "-f", "-", text=rule)
         again = arrived()
         print(f"without the rule: {free[0]} of 20 frames accepted, {free[1]} arrived")
         print(f"with the rule:    {blocked[0]} of 20 frames accepted, {blocked[1]} arrived")

@@ -1,7 +1,12 @@
 [Unit]
 Description=IBE recorder: anonymise the last hour and delete the raw logs
+# if this job fails or hangs, capture is stopped and the RAM disk is emptied without its help
+OnFailure=ibe-failsafe.service
 
 [Service]
 Type=oneshot
 Environment=PYTHONPATH=/opt/ibe
+# a memory dump of this process would hold raw log lines
+LimitCORE=0
+TimeoutStartSec=45min
 ExecStart=/usr/bin/python3 -m ibe_recorder --config /etc/ibe/config.json run

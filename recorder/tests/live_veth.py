@@ -7,7 +7,8 @@ Two virtual cable pairs stand in for the two mirror ports. A capture file is rep
 while one Zeek process per port captures, exactly as on the device. The test then checks:
 
   1. packets seen by Zeek against packets sent, at each replay rate
-  2. hourly rotation (here every 20 seconds), anonymisation, deletion of the raw logs
+  2. hourly rotation (here every 20 seconds), reports about open connections (here every 10 seconds),
+     anonymisation, deletion of the raw logs
   3. a log left open by a killed capture is not lost: it is rotated when capture restarts
   4. pulling the key stops the recording and removes everything raw from memory
 
@@ -20,6 +21,7 @@ import gzip
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -31,7 +33,8 @@ sys.path.insert(0, os.path.join(REPO, "recorder"))
 from ibe_recorder import core, pipeline  # noqa: E402
 
 PAIRS = (("ibe0", "ibe1"), ("ibe2", "ibe3"))
-ROTATE = "redef Log::default_rotation_interval = 20 secs; redef Stats::report_interval = 5 secs;"
+ROTATE = ("redef Log::default_rotation_interval = 20 secs; redef Stats::report_interval = 5 secs; "
+          "redef IBE::open_interval = 10 secs;")
 
 
 def sh(*cmd, check=True):
@@ -59,7 +62,7 @@ def links(up=True):
 def start_zeek(zeek, raw, iface):
     d = os.path.join(raw, iface)
     os.makedirs(d, exist_ok=True)
-    log = open(os.path.join(os.path.dirname(raw), f"zeek-{iface}.txt"), "a")
+    log = open(os.path.join(os.path.dirname(raw), f"zeek-{iface}.txt"), "a")   # Zeek's own messages, not traffic
     return subprocess.Popen([zeek, "-b", "-C", "-i", iface, os.path.join(REPO, "recorder", "zeek", "ibe.zeek"), "-e", ROTATE],
                             cwd=d, stdout=log, stderr=log)
 
@@ -94,8 +97,14 @@ def main():
     if os.path.exists(a.work):
         raise SystemExit(f"{a.work} exists, give a new directory")
     w = os.path.abspath(a.work)
-    cfg = dict(pipeline.DEFAULTS, raw_dir=f"{w}/raw", data_dirs=[f"{w}/ssd", f"{w}/sd"], key_dir=f"{w}/key",
-               state_dir=f"{w}/state", manage_services=False, interfaces=[b for _, b in PAIRS], wan_tokens=True)
+    # raw logs go to a RAM disk as on the device, where the recorder refuses anything else
+    ram = os.path.join("/dev/shm", "ibe-live-" + os.path.basename(w))
+    shutil.rmtree(ram, ignore_errors=True)
+    if not pipeline.on_ram_disk(ram):
+        raise SystemExit("/dev/shm is not a RAM disk on this machine")
+    cfg = dict(pipeline.DEFAULTS, raw_dir=f"{ram}/raw", data_dirs=[f"{w}/ssd", f"{w}/sd"], key_dir=f"{w}/key",
+               state_dir=f"{w}/state", manage_services=False, interfaces=[b for _, b in PAIRS], wan_tokens=True,
+               proc_swaps=f"{w}/noswaps", raise_errors=True)
     os.makedirs(cfg["key_dir"])
     pipeline.init_key(cfg["key_dir"])
     with open(os.path.join(cfg["key_dir"], "armed.json"), "w") as f:
@@ -121,13 +130,19 @@ def main():
                       f"port {n}: sent {sent[n]}, seen {got} ({100 * got / max(sent[n], 1):.2f} percent), "
                       f"dropped by capture {drop}", flush=True)
         time.sleep(25)                                      # let the last logs rotate
+        before = {p for _, p in pipeline.completed(cfg)}
         st = pipeline.run_once(cfg)
         check("anonymiser state", st["state"] == "ok", st["state"])
         check("records written and duplicates across the two ports removed",
-              st["records_out"] > 0 and st["records_dropped"].get("duplicate", 0) > 0,
+              st["records_out"] > 0 and st["records_dropped"].get("duplicate", 0) > 0 and not st["errors"],
               f"written {st['records_out']}, dropped {st['records_dropped']}")
-        left = sorted(n for i in cfg["interfaces"] for n in os.listdir(os.path.join(cfg["raw_dir"], i)) if n[0] != ".")
-        check("only the open logs remain in memory", set(left) <= pipeline.ACTIVE, str(left))
+        check("connections that stay open are reported while they are open", st.get("records_open", 0) > 0,
+              f"{st.get('records_open', 0)} reports (every 10 seconds here, every hour on the device)")
+        # Zeek keeps rotating while the anonymiser works. A log completed during the run is kept for the
+        # next run, never deleted unread. Everything the run found at its start must be gone.
+        after = {p for _, p in pipeline.completed(cfg)}
+        check("every completed log the run found is deleted, later ones are kept for the next run",
+              not (before & after) and len(before) > 0, f"{len(before)} read and deleted, {len(after)} completed meanwhile")
         q = st["quality_last"]
         check("capture reports present for both ports", all(len(q[str(n)]["stats"]) > 0 for n in (0, 1)),
               f"packets by port {[q[str(n)]['pkts'] for n in (0, 1)]}, dropped {[q[str(n)]['dropped'] for n in (0, 1)]}")
@@ -137,6 +152,10 @@ def main():
                 raw = f.read()
             text += gzip.decompress(raw).decode() if p.endswith(".gz") else raw.decode()
         check("output passes the leak scan", core.scan_text(text) is None)
+        n_before = st["records_out"]
+        st = pipeline.run_once(cfg)
+        check("the next run reads the logs completed meanwhile", not ({p for _, p in pipeline.completed(cfg)} & after)
+              and st["records_out"] >= n_before and not st["errors"], f"{st['records_out'] - n_before} more records")
 
         # 3. kill one capture hard in the middle of a log, restart it, nothing may be lost
         sent, _ = replay(os.path.abspath(a.pcap), 200)
@@ -148,7 +167,7 @@ def main():
         n_open = sum(1 for _ in pipeline.read_log(open_log)) if os.path.exists(open_log) else 0
         zeeks[i] = start_zeek(a.zeek, cfg["raw_dir"], i)
         time.sleep(6)
-        rot = [p for p in pipeline.rotated(cfg["raw_dir"], i, "conn")]
+        rot = [p for n, p in pipeline.of_kind(pipeline.completed(cfg), "conn") if n == 0]
         n_rot = sum(1 for p in rot for _ in pipeline.read_log(p))
         check("log left open by a killed capture is rotated at restart, not overwritten",
               n_open > 0 and n_rot >= n_open, f"{n_open} records in the open log, {n_rot} in rotated logs after restart")
@@ -178,6 +197,7 @@ def main():
             except subprocess.TimeoutExpired:
                 z.kill()
         links(up=False)
+        shutil.rmtree(ram, ignore_errors=True)
 
 
 if __name__ == "__main__":

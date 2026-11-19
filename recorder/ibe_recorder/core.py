@@ -10,6 +10,7 @@ import functools
 import hashlib
 import hmac
 import ipaddress
+import math
 import os
 import re
 
@@ -167,7 +168,9 @@ class PublicSuffix:
                     self.rules.add(line)
 
     def registrable(self, name: str):
-        name = (name or "").lower().rstrip(".")
+        if not isinstance(name, str):
+            return None
+        name = name.lower().rstrip(".")
         if not name or name.replace(".", "").isdigit() or ":" in name:
             return None
         labels = name.split(".")
@@ -208,20 +211,31 @@ class Categoriser:
 def _int(v, default=0):
     try:
         return int(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
-def established(rec: dict) -> bool:
-    """True if the responder took part: TCP handshake answered, or any responder packet otherwise."""
+def established(rec: dict, is_open: bool = False) -> bool:
+    """True if the responder took part in the connection.
+
+    TCP: the responder sent a SYN-ACK, an acknowledgement, data or a FIN (Zeek history letters
+    h, a, d, f). A reset alone is a refusal. Other protocols: any packet or byte from the responder.
+    A report about a connection that is still open counts the packets since the previous report,
+    so there the responder must also have sent a packet in that interval.
+    """
+    answered = _int(rec.get("resp_pkts")) > 0 or _int(rec.get("resp_bytes")) > 0
     if rec.get("proto") == "tcp":
-        return "h" in (rec.get("history") or "")
-    return _int(rec.get("resp_pkts")) > 0 or _int(rec.get("resp_bytes")) > 0
+        took_part = any(c in "hadf" for c in str(rec.get("history") or ""))
+        return took_part and (answered or not is_open)
+    return answered
 
 
 def transform(rec: dict, pz: Pseudonymiser, scope: Scope, gateways: set, wan_tokens: bool,
-              ip2dom: dict, psl: PublicSuffix, cat: Categoriser, iface: int = 0):
+              ip2dom: dict, psl: PublicSuffix, cat: Categoriser, iface: int = 0, is_open: bool = False):
     """Turn one Zeek conn record into an anonymised record, or (None, reason) if it is dropped.
+
+    is_open marks a report about a connection that is still open (see zeek/ibe.zeek): its time is
+    that of the last packet and its counts cover the time since the previous report.
 
     Local endpoints are named by the pseudonym of their MAC address. If the frame came through a
     router (gateway MAC) the IP address is used instead and the record says so in 'ib'.
@@ -231,8 +245,16 @@ def transform(rec: dict, pz: Pseudonymiser, scope: Scope, gateways: set, wan_tok
     try:
         oh, rh = rec["id.orig_h"], rec["id.resp_h"]
         omac, rmac = rec.get("orig_l2_addr") or "", rec.get("resp_l2_addr") or ""
+        if not all(isinstance(x, str) for x in (oh, rh, omac, rmac)):
+            raise ValueError("type")
+        for mac in (omac, rmac):
+            if mac:
+                norm_mac(mac)
         os_, rs_ = scope.of(oh, omac, gateways), scope.of(rh, rmac, gateways)
-    except (KeyError, ValueError):
+        ts, dur = float(rec["ts"]), float(rec.get("duration") or 0)
+        if not (ts > 0 and math.isfinite(ts) and math.isfinite(dur)):
+            raise ValueError("time")
+    except (KeyError, ValueError, TypeError, AttributeError):
         return None, "malformed"
     if os_ in ("mcast", "bcast"):
         return None, "group_source"
@@ -242,14 +264,16 @@ def transform(rec: dict, pz: Pseudonymiser, scope: Scope, gateways: set, wan_tok
     if not re.fullmatch(r"[a-z0-9_]{2,20}", proto):
         return None, "malformed"
     op, rp = _int(rec.get("id.orig_p"), -1), _int(rec.get("id.resp_p"), -1)
-    out = {"ts": int(float(rec.get("ts", 0))), "dur": round(float(rec.get("duration") or 0), 3),
+    out = {"ts": int(ts), "dur": round(dur, 3),
            "proto": proto, "op": op, "rp": rp, "os": os_, "rs": rs_,
            "st": _word(rec.get("conn_state"), 8), "hist": _word(rec.get("history"), 32, r"[A-Za-z^]"),
            "svc": _word(rec.get("service"), 24, r"[a-z0-9_,\-]"),
            "ob": _int(rec.get("orig_bytes")), "rb": _int(rec.get("resp_bytes")),
            "opk": _int(rec.get("orig_pkts")), "rpk": _int(rec.get("resp_pkts")),
-           "est": established(rec), "vlan": _int(rec.get("vlan"), -1), "if": iface, "ib": "",
+           "est": established(rec, is_open), "vlan": _int(rec.get("vlan"), -1), "if": iface, "ib": "",
            "ipp": _int(rec.get("ip_proto"), -1)}
+    if is_open:
+        out["open"] = True
 
     def local(ip, mac, side):
         if mac and not is_group_mac(mac) and norm_mac(mac) not in gateways:
@@ -305,9 +329,9 @@ def leak_check(record: dict):
         if k in _NUMERIC:
             if isinstance(v, bool) or not isinstance(v, (int, float)):
                 return f"field {k} is not numeric"
-        elif k == "est":
+        elif k in ("est", "open"):
             if not isinstance(v, bool):
-                return "field est is not boolean"
+                return f"field {k} is not boolean"
         elif k in _ALLOWED:
             if not isinstance(v, str) or not _ALLOWED[k].fullmatch(v):
                 return f"field {k} has an unexpected value"

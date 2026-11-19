@@ -28,7 +28,18 @@ python3 run_series3.py inc/inc_day.parquet res/
 `GT_ROLE=init` takes the role from the side that opened the connection, which connection logs
 record and flow exports do not. `--hours` gives the working hours used by the outage rule.
 
+Two kinds of recorder record are treated specially by `adapt_recorder.py` (see the note of
+19 November 2026 in `../docs/method.md`):
+
+- A TCP record without the opening SYN and without the answering SYN-ACK was picked up in the middle of a conversation. Who opened it is unknown, so its role is decided by the port rules that `incidence3.py` uses for flow exports, and it counts for a device only if the device sent a packet in it other than a reset.
+- An hourly report about a connection that is still open (`"open":true`) marks the flow type as present at that time. Its bytes are not added.
+
+Registered sensitivity analysis: the same command without `GT_ROLE=init` decides every role by the
+port rules.
+
 ## Tests
 
-`tests/test_adapt_recorder.py` covers the outage rule. The complete chain from a capture file to the
-stopping rule is checked by `../recorder/tests/e2e.py`.
+`tests/test_adapt_recorder.py` covers the outage rule. `tests/test_recorder_rows.py` runs small sets of
+recorder records through the adapter and `incidence3.py` and checks the flow types that come out
+(handshake seen and not seen, refusals, hourly reports). The complete chain from a capture file to
+the stopping rule is checked by `../recorder/tests/e2e.py` and `../recorder/tests/scenarios.py`.

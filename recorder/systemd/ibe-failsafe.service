@@ -1,0 +1,8 @@
+[Unit]
+Description=IBE recorder: the hourly job failed, stop capture and empty the RAM disk
+
+[Service]
+Type=oneshot
+# The pattern stops every running capture. Capture starts again after the next hourly job that succeeds.
+ExecStart=/usr/bin/systemctl stop ibe-zeek@*.service
+ExecStart=/usr/bin/find /run/ibe/raw -mindepth 1 -delete

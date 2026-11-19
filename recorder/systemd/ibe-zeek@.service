@@ -18,6 +18,8 @@ ExecStartPre=/usr/sbin/ip link set %i up promisc on arp off
 ExecStartPre=-/usr/sbin/ethtool -K %i rx off tx off sg off tso off gso off gro off lro off rxvlan off txvlan off
 WorkingDirectory=/run/ibe/raw/%i
 ExecStart=/opt/zeek/bin/zeek -b -C -i %i /opt/ibe/zeek/ibe.zeek
+# a memory dump of this process would hold raw packets
+LimitCORE=0
 Restart=on-failure
 RestartSec=30
 RestartPreventExitStatus=3

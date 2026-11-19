@@ -1,4 +1,4 @@
-# Method section, working draft (14 November 2026)
+# Method section, working draft (19 November 2026)
 
 Status: draft for the paper. Definitions follow `docs/method.md`, which is frozen. Numbers are not
 quoted here. They come from `paper/figures/results_tables.md`, which is generated from the stored tables.
@@ -23,7 +23,9 @@ A **flow type** is one allowlist rule: *transport / role / service port @ peer*.
 - *Role* is `out` if the device opens the connection and `in` if it accepts it. Connection logs
   record the originator. Flow exports do not, so there the role is inferred: port fan-out over the
   device's trace, then a port below 1024, then equal ports (`sym`), then the recorded initiator, then
-  the lower port.
+  the lower port. A connection log knows the originator only if it saw the connection being opened.
+  A TCP record without the opening SYN and without the answering SYN-ACK was picked up in the middle
+  of a conversation, and its roles are inferred like those of a flow export.
 - *Service port* is the responder's port. Ports 32768 and above form one class, because they are
   ephemeral on common systems.
 - Protocols without ports (ICMP, ICMPv6, IGMP and others) are one service per peer.
@@ -42,9 +44,14 @@ Table 1. Levels of detail.
 | host | device identity | address | finest baseline |
 
 **Participation filter.** An inbound service counts on a day only if the device took part on that
-day with that peer: it sent payload (flow exports) or the connection was established (connection
-logs). Scans and floods that the device does not answer are not device behaviour and must not be
-learned. Without the filter they would enter the allowlist as rules that admit the scanner.
+day with that peer: it sent payload (flow exports) or it answered with anything but a reset
+(connection logs). Scans and floods that the device does not answer are not device behaviour and
+must not be learned. Without the filter they would enter the allowlist as rules that admit the scanner.
+
+**Presence on a day.** A flow type is present on a day if a connection of that type starts on that
+day or an open connection of that type carries packets on that day. The second half matters for
+the devices we study: a connection that a device keeps open for weeks would otherwise count once,
+on the day it was opened, or never, if it was opened before the observation began.
 
 **Sampling unit.** The unit is a local calendar day on which the device is active. The first and
 the last day of a trace are partial and are dropped, as is any day on which the recorder was down
@@ -133,7 +140,7 @@ and, in long traces, again every 21 days.
 3. Assign the role and the service port (Section 2). Collapse service ports of 32768 and above.
 4. Label the peer at the chosen level (Table 1). Well-known multicast groups are named. IPv6 solicited-node groups form one class, because their addresses embed bits of the target's address.
 5. Apply the participation filter per device, day, service and peer.
-6. Count each flow type once per active local day. Drop partial days.
+6. Count each flow type once per active local day: on the day a connection starts and on every later day on which it still carries packets. Drop partial days.
 7. Each day compute Q_1(T) and U(T). Stop at the first T ≥ 7 with U(T) ≤ ε.
 8. The allowlist is the set of flow types seen on at least one day of the learning period. As a sensitivity analysis the list is also built from types seen on at least two and at least three different days.
 9. After enforcement a connection outside the list raises an alert. Blocking follows after a grace period (alert, then block).
@@ -161,17 +168,26 @@ from the method text alone, with sets and loops instead of matrices.
 Recording at a site uses a purpose-built recorder (`recorder/`). It listens on switch mirror ports
 (incoming traffic of every port, so each frame is seen once), runs one Zeek process per port and
 keeps raw logs in memory only. Once an hour it turns the connection log into anonymised records and
-deletes the raw logs. Local devices are named by HMAC-SHA256 pseudonyms of their MAC addresses. The
+deletes the raw logs. Three settings make the connection log say what an enforcement point would
+see. A connection that stays open is reported every hour in which it carries packets, not only when
+it ends. A silent TCP connection is kept for a day and a silent UDP flow for two minutes, so that a
+conversation is not cut into pieces whose first speaker is mistaken for the opener. And a record
+whose handshake was not seen is marked, so that its roles are inferred and not taken at face value.
+Local devices are named by HMAC-SHA256 pseudonyms of their MAC addresses. The
 key is generated on the device at the site, lives on a removable stick that stays with the site's IT
 officer and is never available to the researchers. Remote hosts are never named: they carry a
 coarse service type and, where the site's written permission covers it, one-way tokens of the
 address, its network and its registrable domain. Records pass a field whitelist and a scan for
 address shapes before they are written. The recorder cannot transmit on its capture ports, starts
-only after an approval reference has been entered on site, and stops by itself after the permitted
-number of recording days.
+only after an approval reference has been entered on site, does not record while any swap to disk
+is active, and stops by itself after the permitted number of recording days.
 
-The chain from packets to the stopping rule was verified on a public capture replayed as identical
-days, where the correct answers are known in advance (`recorder/README.md`).
+The chain from packets to the stopping rule was verified in two ways (`recorder/README.md`). A public
+capture was replayed as identical days, where the correct answers are known in advance. And a
+hand-made capture with one case for every situation above (a connection open for 50 hours, one that
+never closes, one picked up in the middle with the server speaking first, silence, a slow answer,
+refusals, midnight) was run through the whole chain and gave exactly the flow types written down
+beforehand, for every device and day.
 
 ## 8. Platform selection
 
@@ -184,13 +200,16 @@ stack or Zeek. FPGA platforms such as NetFPGA SUME target 10 Gb/s and above and 
 development effort without benefit at the 1 Gb/s links we study. The earlier Raspberry Pi 4 offers
 neither an accessible PCIe lane nor an on-board clock. Fanless x86 appliances with four Intel I226
 ports are the more capable recorder and remain our scale-up path for larger hospital networks, at
-roughly twice the cost. Neither the on-board Ethernet driver of the Raspberry Pi 5 (macb) nor the
-RTL8125 driver (r8169) supports native XDP, so the enforcement cost we report is that of the portable
-nftables kernel path and is a conservative upper bound relative to accelerated data planes.
+roughly twice the cost. In the kernel series of the Raspberry Pi used here (6.12) neither the
+on-board Ethernet driver (macb) nor the RTL8125 driver (r8169) supports native XDP, so the
+enforcement cost we report is that of the portable nftables kernel path and is a conservative upper
+bound relative to accelerated data planes.
 
 ## Open points before submission
 
 - "roughly twice the cost" in Section 8 must be rechecked against current prices.
 - Section 7 will get the measured loss and throughput on the actual device.
 - Related work and the results text are separate files and are not drafted yet.
+- XDP support for the on-board driver (macb) was under review upstream in 2026 (netdev, "net: macb: Add XDP support and page pool integration", version 6 of 23 March 2026). State the kernel version in the paper and recheck before submission.
+- The share of TCP records without a handshake and the number of hourly reports at each site belong in the results (they show how much the three recorder settings matter in a real network).
 - Full bibliographic entries for Good 1953, Robbins 1968 and Chao and co-authors 2014 go into the reference list.

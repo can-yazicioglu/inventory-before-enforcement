@@ -15,14 +15,18 @@ lifetime, and a cost low enough for a small clinic.
 | FPGA platforms (NetFPGA SUME class) | ruled out | built for 10 Gbit/s and above, cost and development effort without benefit at 1 Gbit/s links |
 | Fanless x86 box with four Intel I226 ports | scale-up path | the more capable recorder for large hospital networks, at a higher price |
 
-Neither the on-board Ethernet driver of the Raspberry Pi 5 (macb) nor the RTL8125 driver (r8169)
-supports native XDP. The enforcement cost reported in the study is therefore that of the portable
-nftables kernel path, a conservative upper bound relative to accelerated data planes.
+In the kernel series used here (Raspberry Pi kernel 6.12, checked in branch rpi-6.12.y at version
+6.12.118 on 19 November 2026) neither the on-board Ethernet driver of the Raspberry Pi 5 (macb) nor
+the RTL8125 driver (r8169) supports native XDP. The enforcement cost reported in the study is
+therefore that of the portable nftables kernel path, a conservative upper bound relative to
+accelerated data planes. XDP support for macb was under review upstream in 2026, so this must be
+rechecked for any later kernel.
 
 The adapter is a PCIe packet switch with two RTL8125 controllers (boards of this design are sold by
 several vendors). The in-kernel r8169 driver of the Raspberry Pi kernel handles the RTL8125A, B and D
 variants (branch rpi-6.12.y), so no vendor driver is installed. The PCIe connector must be switched on
-with `dtparam=pciex1`, which the installer does.
+with `dtparam=pciex1`, which the installer does. The same kernel is built with zram writeback
+(`CONFIG_ZRAM_WRITEBACK=y`), which is why the recorder checks that no swap can reach a disk.
 
 The software has no board-specific code. It needs Linux (arm64 or amd64), Python 3.11 or later
 (standard library only, tested with 3.11, 3.12 and 3.13), Zeek 8.0, nftables and one network

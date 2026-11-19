@@ -13,13 +13,27 @@ from . import pipeline
 
 
 def cmd_run(cfg, args):
-    st = pipeline.run_once(cfg)
+    try:
+        st = pipeline.run_once(cfg)
+    except Exception as e:
+        # Last resort. Completed raw logs must not stay in RAM whatever went wrong. Only the kind of
+        # error is printed: its text could quote raw data, and output goes to the system journal.
+        try:
+            pipeline.purge_raw(pipeline._usable(cfg))
+        except Exception:
+            pass
+        print("run failed:", type(e).__name__)
+        sys.exit(1)
     print(st["state"], "| recording days:", st.get("recording_days", 0), "| records:", st.get("records_out", 0))
 
 
 def cmd_status(cfg, args):
     path = os.path.join(cfg["state_dir"], "status.json")
-    print(open(path, encoding="utf-8").read() if os.path.exists(path) else "no status yet")
+    if not os.path.exists(path):
+        print("no status yet")
+        return
+    with open(path, encoding="utf-8") as f:
+        print(f.read())
 
 
 def cmd_init_key(cfg, args):
@@ -59,7 +73,12 @@ def cmd_disarm(cfg, args):
 def cmd_extend(cfg, args):
     """Raise the limit after the site has approved an extension in writing."""
     cfg_path = args.config
-    data = json.load(open(cfg_path, encoding="utf-8")) if os.path.exists(cfg_path) else {}
+    data = {}
+    if os.path.exists(cfg_path):
+        with open(cfg_path, encoding="utf-8") as f:
+            data = json.load(f)
+    if int(args.days) < 1:
+        sys.exit("the limit must be at least one day")
     data["max_recording_days"] = int(args.days)
     data.setdefault("extensions", []).append({"days": int(args.days), "approval_ref": args.approval_ref,
                                                "at": datetime.datetime.now().isoformat()})
