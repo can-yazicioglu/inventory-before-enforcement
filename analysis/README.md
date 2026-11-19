@@ -26,13 +26,16 @@ python3 run_series3.py inc/inc_day.parquet res/
 ```
 
 `GT_ROLE=init` takes the role from the side that opened the connection, which connection logs
-record and flow exports do not. `--hours` gives the working hours used by the outage rule.
+record and flow exports do not. `--hours` gives the working hours used by the outage rule. It has
+no default: `--hours none` switches the rule off on purpose, and the output then says so.
 
-Two kinds of recorder record are treated specially by `adapt_recorder.py` (see the note of
+Four kinds of recorder record are treated specially by `adapt_recorder.py` (see the notes of
 19 November 2026 in `../docs/method.md`):
 
-- A TCP record without the opening SYN and without the answering SYN-ACK was picked up in the middle of a conversation. Who opened it is unknown, so its role is decided by the port rules that `incidence3.py` uses for flow exports, and it counts for a device only if the device sent a packet in it other than a reset.
-- An hourly report about a connection that is still open (`"open":true`) marks the flow type as present at that time. Its bytes are not added.
+- Opener not seen. A TCP record without the opening SYN and without the answering SYN-ACK was picked up in the middle of a conversation. A UDP record that Zeek turned around (`^` in the history) began with a packet from a service port. Who opened these is unknown, so the role is decided by the port rules that `incidence3.py` uses for flow exports, and the record counts for a device only if the device sent a packet in it (TCP: other than a reset).
+- An hourly report about a connection that is still open (`"open":true`) marks the flow type as present at that time, for each side that sent a packet in that hour. Its bytes are not added.
+- A protocol without ports has no roles, so the participation filter of `incidence3.py` cannot work on it. Its record counts for the answering side only if that side sent a packet. An ICMP error message gives its sender no flow type: it is the refusal of a packet of somebody else, as a reset is for TCP.
+- A finished record that ends in a later clock hour than it began counts only for its opener, at the start. It covers the whole life of the connection, so which side sent on which day is taken from the hourly reports.
 
 Registered sensitivity analysis: the same command without `GT_ROLE=init` decides every role by the
 port rules.
@@ -41,5 +44,7 @@ port rules.
 
 `tests/test_adapt_recorder.py` covers the outage rule. `tests/test_recorder_rows.py` runs small sets of
 recorder records through the adapter and `incidence3.py` and checks the flow types that come out
-(handshake seen and not seen, refusals, hourly reports). The complete chain from a capture file to
+(handshake seen and not seen, refusals, hourly reports, turned-around UDP, protocols without ports, long
+connections whose other side is switched off on the first day).
+The complete chain from a capture file to
 the stopping rule is checked by `../recorder/tests/e2e.py` and `../recorder/tests/scenarios.py`.

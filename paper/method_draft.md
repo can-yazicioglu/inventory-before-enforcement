@@ -25,12 +25,17 @@ A **flow type** is one allowlist rule: *transport / role / service port @ peer*.
   device's trace, then a port below 1024, then equal ports (`sym`), then the recorded initiator, then
   the lower port. A connection log knows the originator only if it saw the connection being opened.
   A TCP record without the opening SYN and without the answering SYN-ACK was picked up in the middle
-  of a conversation, and its roles are inferred like those of a flow export.
+  of a conversation, and a UDP record whose first packet came from a service port is the answer to
+  a question the log does not hold. The roles of both are inferred like those of a flow export, and
+  they count for a device only if the device sent a packet in them.
 - *Service port* is the responder's port. Ports 32768 and above form one class, because they are
   ephemeral on common systems.
-- Protocols without ports (ICMP, ICMPv6, IGMP and others) are one service per peer.
+- Protocols without ports (ICMP, ICMPv6, IGMP, tunnels and others) are one service per peer.
 - *Peer* depends on the level of detail (Table 1). A LAN peer is always a stable device identity
-  (MAC address or its pseudonym), never an IP address when a MAC address is available.
+  (MAC address or its pseudonym), never an IP address when a MAC address is available. A frame that
+  crosses a router carries the router's MAC address. At clinical sites the device behind it is then
+  named by the MAC address that answers for its IP address in ARP or IPv6 neighbour discovery on the
+  mirrored networks.
 
 Table 1. Levels of detail.
 
@@ -47,11 +52,15 @@ Table 1. Levels of detail.
 day with that peer: it sent payload (flow exports) or it answered with anything but a reset
 (connection logs). Scans and floods that the device does not answer are not device behaviour and
 must not be learned. Without the filter they would enter the allowlist as rules that admit the scanner.
+Protocols without ports have no inbound role. At clinical sites their records count for the
+answering side only if it sent a packet, and an ICMP error message, which is a refusal like a reset,
+counts for nobody. In the public data they count for both sides.
 
-**Presence on a day.** A flow type is present on a day if a connection of that type starts on that
-day or an open connection of that type carries packets on that day. The second half matters for
-the devices we study: a connection that a device keeps open for weeks would otherwise count once,
-on the day it was opened, or never, if it was opened before the observation began.
+**Presence on a day.** A flow type is present for a device on a day if a connection of that type
+starts on that day, or if the device sends a packet on that day in a connection of that type that
+is already open. The second half matters for the devices we study: a connection that a device keeps
+open for weeks would otherwise count once, on the day it was opened, or never, if it was opened
+before the observation began. Presence is measured to the clock hour.
 
 **Sampling unit.** The unit is a local calendar day on which the device is active. The first and
 the last day of a trace are partial and are dropped, as is any day on which the recorder was down
@@ -135,12 +144,12 @@ and, in long traces, again every 21 days.
 
 ## 5. Building the allowlist: the complete list of rules
 
-1. Identify each device by its MAC address (clinical sites: by the pseudonym the recorder derives from it). A virtual machine is its own device. Routers are not devices.
+1. Identify each device by its MAC address (clinical sites: by the pseudonym the recorder derives from it, also when a frame arrives through a router). A virtual machine is its own device. Routers are not devices.
 2. Keep connection metadata only: time, transport, ports, sides, bytes, state.
 3. Assign the role and the service port (Section 2). Collapse service ports of 32768 and above.
 4. Label the peer at the chosen level (Table 1). Well-known multicast groups are named. IPv6 solicited-node groups form one class, because their addresses embed bits of the target's address.
 5. Apply the participation filter per device, day, service and peer.
-6. Count each flow type once per active local day: on the day a connection starts and on every later day on which it still carries packets. Drop partial days.
+6. Count each flow type once per active local day: on the day a connection starts and on every later day on which the device still sends packets in it. Drop partial days.
 7. Each day compute Q_1(T) and U(T). Stop at the first T ≥ 7 with U(T) ≤ ε.
 8. The allowlist is the set of flow types seen on at least one day of the learning period. As a sensitivity analysis the list is also built from types seen on at least two and at least three different days.
 9. After enforcement a connection outside the list raises an alert. Blocking follows after a grace period (alert, then block).
@@ -168,11 +177,16 @@ from the method text alone, with sets and loops instead of matrices.
 Recording at a site uses a purpose-built recorder (`recorder/`). It listens on switch mirror ports
 (incoming traffic of every port, so each frame is seen once), runs one Zeek process per port and
 keeps raw logs in memory only. Once an hour it turns the connection log into anonymised records and
-deletes the raw logs. Three settings make the connection log say what an enforcement point would
-see. A connection that stays open is reported every hour in which it carries packets, not only when
-it ends. A silent TCP connection is kept for a day and a silent UDP flow for two minutes, so that a
-conversation is not cut into pieces whose first speaker is mistaken for the opener. And a record
-whose handshake was not seen is marked, so that its roles are inferred and not taken at face value.
+deletes the raw logs. Six measures make the connection log say what an enforcement point would
+see. A connection that stays open is reported at every full hour in which it carries packets, and
+once more when it ends, and which side sent on which day is taken from these reports, not from the
+record written at the end. A silent TCP connection is kept for a day and a
+silent UDP flow for two minutes, so that a conversation is not cut into pieces whose first speaker
+is mistaken for the opener. A record whose opener was not seen is marked, so that its roles are
+inferred and not taken at face value. Packets that every device sends from the same address (a DHCP
+request) get one record per sender. A device that is reached through a router is named by its
+own MAC address, which the recorder learns from ARP and neighbour discovery and keeps at the site.
+And a tunnel is recorded as one flow of the device that keeps it, without looking inside.
 Local devices are named by HMAC-SHA256 pseudonyms of their MAC addresses. The
 key is generated on the device at the site, lives on a removable stick that stays with the site's IT
 officer and is never available to the researchers. Remote hosts are never named: they carry a
@@ -180,14 +194,17 @@ coarse service type and, where the site's written permission covers it, one-way 
 address, its network and its registrable domain. Records pass a field whitelist and a scan for
 address shapes before they are written. The recorder cannot transmit on its capture ports, starts
 only after an approval reference has been entered on site, does not record while any swap to disk
-is active, and stops by itself after the permitted number of recording days.
+is active, and stops by itself after the permitted number of recording days. Before use the recorder
+was reviewed in two rounds from the code alone, each time once for what can leave the site and once
+for what is measured. Every case these reviews found is now part of the tests.
 
 The chain from packets to the stopping rule was verified in two ways (`recorder/README.md`). A public
 capture was replayed as identical days, where the correct answers are known in advance. And a
 hand-made capture with one case for every situation above (a connection open for 50 hours, one that
 never closes, one picked up in the middle with the server speaking first, silence, a slow answer,
-refusals, midnight) was run through the whole chain and gave exactly the flow types written down
-beforehand, for every device and day.
+refusals, midnight, three devices asking for an address at once, a ping that runs for days, a
+device that is switched off, two VLANs joined by a router, tunnels) was run through the whole chain
+and gave exactly the flow types written down beforehand, for every device and day.
 
 ## 8. Platform selection
 
@@ -211,5 +228,7 @@ bound relative to accelerated data planes.
 - Section 7 will get the measured loss and throughput on the actual device.
 - Related work and the results text are separate files and are not drafted yet.
 - XDP support for the on-board driver (macb) was under review upstream in 2026 (netdev, "net: macb: Add XDP support and page pool integration", version 6 of 23 March 2026). State the kernel version in the paper and recheck before submission.
-- The share of TCP records without a handshake and the number of hourly reports at each site belong in the results (they show how much the three recorder settings matter in a real network).
+- The share of records whose opener was not seen, the number of hourly reports, the number of records named through the neighbour table and the number of records still named by IP address at each site belong in the results (they show how much the recorder's measures matter in a real network).
+- The public data keep four behaviours that the recorder no longer has (notes of 19 November 2026 in `docs/method.md`): one flow for all senders of a DHCP request within two minutes, a flow type for a device that received a packet of a protocol without ports and did not answer, a flow type for a device that sent an ICMP error message, and no hourly reports. State them as limits of the public data.
+- Report the results of the primary group by device type and once without IP phones (registered on 19 November 2026): phones choose the ports of every call anew.
 - Full bibliographic entries for Good 1953, Robbins 1968 and Chao and co-authors 2014 go into the reference list.

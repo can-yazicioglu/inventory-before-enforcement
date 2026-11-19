@@ -53,13 +53,14 @@ python3 recorder/tests/e2e.py --pcap capture.pcap --work /tmp/ibe-e2e      # any
 `scenarios.py` builds a capture by hand with one case for every situation that a connection log
 gets wrong unless it is handled on purpose (a connection open for 50 hours, one that never closes,
 one picked up in the middle with the server speaking first, 20 minutes of silence, a slow answer,
-refusals, midnight) and checks that the chain gives exactly the flow types written down beforehand
-for every device and day.
+refusals, midnight, three devices asking for an address at once, a ping that runs for days, a device
+that is switched off, two VLANs joined by a router, tunnels) and checks that the chain gives exactly
+the flow types written down beforehand for every device and day.
 
 `e2e.py` replays a real capture as 30 identical days through Zeek, the recorder, the adapter and
 the analysis, and checks answers that are known in advance: nothing identifying leaves the
 recorder, every record is accounted for, two mirror ports give the same records as one, the flow
-types equal an independent computation, and GT-C stops on day 10 for ε = 0.3 on every device.
+types equal those of a second implementation of the same rules, and GT-C stops on day 10 for ε = 0.3 on every device.
 
 ## Privacy by construction
 
