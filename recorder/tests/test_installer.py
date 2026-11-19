@@ -64,6 +64,29 @@ def fake_install(root, ifaces, version="13", pi=True, run=True):
     return subprocess.run(["bash", INSTALL] + list(ifaces), env=env, capture_output=True, text=True)
 
 
+class UnitFileTests(unittest.TestCase):
+    """What can be said about the unit files without a system manager."""
+    def unit(self, name):
+        with open(os.path.join(os.path.dirname(INSTALL), "systemd", name), encoding="utf-8") as f:
+            return [x.strip() for x in f if x.strip() and not x.startswith("#")]
+
+    def test_capture_unit_does_not_look_at_the_stick_itself(self):
+        """The system manager never triggers its own automount: a condition on a file of the key stick would
+        find the folder empty whenever the stick is idle. The preflight command does the check instead."""
+        lines = self.unit("ibe-zeek@.service")
+        self.assertFalse([x for x in lines if x.startswith("Condition") and "ibe-key" in x])
+        self.assertTrue([x for x in lines if x.startswith("ExecCondition=") and "preflight" in x])
+        self.assertIn("ConditionPathExists=!/var/lib/ibe/STOP", lines)
+        self.assertIn("LimitCORE=0", lines)
+
+    def test_failsafe_empties_the_ram_disk_whatever_stopping_says(self):
+        lines = self.unit("ibe-failsafe.service")
+        runs = [x for x in lines if x.startswith("ExecStart=")]
+        self.assertEqual(len(runs), 2)
+        self.assertTrue(runs[0].startswith("ExecStart=-/usr/bin/systemctl stop "))        # the minus: a failure is passed over
+        self.assertEqual(runs[1], "ExecStart=/usr/bin/find /run/ibe/raw -mindepth 1 -delete")
+
+
 class InstallerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -101,7 +124,8 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(len(ram), 1)
         self.assertIn("noexec", ram[0])
         self.assertEqual(self.read("etc/rpi/swap.conf.d/90-ibe.conf"), "[Main]\nMechanism=none\n")
-        self.assertEqual(self.read("etc/systemd/journald.conf.d/90-ibe.conf"), "[Journal]\nStorage=volatile\nRuntimeMaxUse=64M\n")
+        self.assertEqual(self.read("etc/systemd/journald.conf.d/90-ibe.conf"),
+                         "[Journal]\nStorage=volatile\nRuntimeMaxUse=64M\nForwardToSyslog=no\n")
         for i in ("eth1", "eth2"):
             rule = self.read(f"etc/ibe/egress-{i}.nft")
             self.assertIn(f'hook egress device "{i}" priority 0; policy drop;', rule)

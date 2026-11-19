@@ -37,9 +37,10 @@ def cmd_status(cfg, args):
 
 
 def cmd_init_key(cfg, args):
+    if not pipeline.key_dir_ok(cfg):               # never create the key on the system disk
+        sys.exit("the key stick is not plugged in (nothing is mounted at the key directory)")
     if os.path.exists(os.path.join(cfg["key_dir"], "hmac.key")):
         sys.exit("a key already exists on the key stick, refusing to overwrite it")
-    os.makedirs(cfg["key_dir"], exist_ok=True)
     print("key written to", pipeline.init_key(cfg["key_dir"]))
 
 
@@ -54,36 +55,50 @@ def cmd_preflight(cfg, args):
 
 def cmd_arm(cfg, args):
     """Recording may only start after ethics approval. The IT officer records the approval reference."""
+    if not pipeline.key_dir_ok(cfg):
+        sys.exit("the key stick is not plugged in (nothing is mounted at the key directory)")
     if pipeline.load_key(cfg["key_dir"]) is None:
         sys.exit("no key on the key stick: run init-key first")
     if os.path.exists(os.path.join(cfg["state_dir"], "STOP")):
         sys.exit("the recording limit was reached: use 'extend' with the site's written approval")
+    if len(args.approval_ref.strip()) < 3:
+        sys.exit("the approval reference is too short: give its date and number")
     with open(os.path.join(cfg["key_dir"], "armed.json"), "w", encoding="utf-8") as f:
         json.dump({"approval_ref": args.approval_ref, "armed_at": datetime.datetime.now().isoformat()}, f)
     print("armed. Capture starts when the ibe-zeek services are started.")
 
 
 def cmd_disarm(cfg, args):
+    if not pipeline.key_dir_ok(cfg):               # the arm file is on the stick: without the stick nothing is disarmed
+        sys.exit("the key stick is not plugged in: the arm file on it was not removed. Recording stops at the next "
+                 "hourly run because the stick is missing, and starts again when the stick is put back")
     p = os.path.join(cfg["key_dir"], "armed.json")
     if os.path.exists(p):
         os.remove(p)
-    print("disarmed")
+        print("disarmed. Capture stops at the next hourly run")
+    else:
+        print("there was no arm file on the key stick: not armed")
 
 
 def cmd_extend(cfg, args):
     """Raise the limit after the site has approved an extension in writing."""
     cfg_path = args.config
-    data = {}
-    if os.path.exists(cfg_path):
-        with open(cfg_path, encoding="utf-8") as f:
-            data = json.load(f)
+    if cfg.get("config_unreadable"):               # never create a file that would put the built-in settings in force
+        sys.exit(f"the configuration file {cfg_path} is missing or cannot be read: repair it first")
+    with open(cfg_path, encoding="utf-8") as f:
+        data = json.load(f)
     if int(args.days) < 1:
         sys.exit("the limit must be at least one day")
+    if len(args.approval_ref.strip()) < 3:
+        sys.exit("the approval reference is too short: give the date and number of the site's letter")
     data["max_recording_days"] = int(args.days)
-    data.setdefault("extensions", []).append({"days": int(args.days), "approval_ref": args.approval_ref,
-                                               "at": datetime.datetime.now().isoformat()})
-    with open(cfg_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=1)
+    entry = {"days": int(args.days), "approval_ref": args.approval_ref, "at": datetime.datetime.now().isoformat()}
+    if args.calendar_days is not None:
+        if int(args.calendar_days) < 1:
+            sys.exit("the calendar limit must be at least one day")
+        data["max_calendar_days"] = entry["calendar_days"] = int(args.calendar_days)
+    data.setdefault("extensions", []).append(entry)
+    pipeline._write_atomic(os.path.abspath(cfg_path), json.dumps(data, indent=1).encode())   # never half a file
     stop = os.path.join(cfg["state_dir"], "STOP")
     if os.path.exists(stop):
         os.remove(stop)
@@ -99,6 +114,8 @@ def cmd_export(cfg, args):
     if src is None:
         sys.exit("no data directory found")
     enc = os.path.join(os.path.dirname(src.rstrip("/")), "export")
+    if cfg.get("export_recipient") and not os.path.isdir(enc):
+        sys.exit("an export key is configured but nothing has been encrypted: check the key file, see status.json")
     if cfg.get("export_recipient") and os.path.isdir(enc):
         pipeline.encrypt_exports(cfg)
         src, names = enc, sorted(n for n in os.listdir(enc) if n.endswith(".gpg"))
@@ -126,7 +143,8 @@ def main(argv=None):
     a.set_defaults(fn=cmd_arm)
     sub.add_parser("disarm").set_defaults(fn=cmd_disarm)
     e = sub.add_parser("extend")
-    e.add_argument("--days", required=True)
+    e.add_argument("--days", required=True, help="new limit on the number of recording days")
+    e.add_argument("--calendar-days", help="new limit on the days between the first and the last recording day")
     e.add_argument("--approval-ref", required=True, help="reference of the site's written approval")
     e.set_defaults(fn=cmd_extend)
     sub.add_parser("preflight").set_defaults(fn=cmd_preflight)

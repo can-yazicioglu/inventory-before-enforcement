@@ -69,6 +69,14 @@ fi
 if [ ! -f "$R/etc/ibe/config.json" ]; then
     IFACES=$(printf '"%s", ' "$@"); IFACES="[${IFACES%, }]"
     sed "s/\"interfaces\": .*/\"interfaces\": ${IFACES},/" "$HERE/config.example.json" > "$R/etc/ibe/config.json"
+else
+    # the capture units enabled below must be the interfaces that the recorder reads, stops and empties
+    python3 -c 'import json, sys; sys.exit(json.load(open(sys.argv[1])).get("interfaces") != sys.argv[2:])' \
+        "$R/etc/ibe/config.json" "$@" || {
+        echo "$R/etc/ibe/config.json names other capture interfaces than this command line."
+        echo "Correct \"interfaces\" in that file, disable the capture units no longer wanted, and run again."
+        exit 1
+    }
 fi
 
 echo "== raw logs in RAM, no swap, journal in RAM"
@@ -89,8 +97,10 @@ if [ -d "$R/etc/rpi" ]; then
 fi
 systemctl mask swap.target
 # Messages of the capture process go to the journal. Kept in RAM, they cannot put anything on the disk.
+# A syslog daemon would copy the journal to files under /var/log: it is switched off if one is installed.
 install -d "$R/etc/systemd/journald.conf.d"
-printf '[Journal]\nStorage=volatile\nRuntimeMaxUse=64M\n' > "$R/etc/systemd/journald.conf.d/90-ibe.conf"
+printf '[Journal]\nStorage=volatile\nRuntimeMaxUse=64M\nForwardToSyslog=no\n' > "$R/etc/systemd/journald.conf.d/90-ibe.conf"
+systemctl disable --now rsyslog.service syslog.socket 2>/dev/null || true
 
 echo "== key stick and data disk, mounted on demand"
 grep -q 'LABEL=IBE-KEY' "$R/etc/fstab" || echo \

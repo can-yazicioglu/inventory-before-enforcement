@@ -30,8 +30,10 @@ def one(zdir, work, copies):
             for s in ("conn", "open_conn", "dns", "ssl")}
     cfg = dict(pipeline.DEFAULTS, raw_dir=f"{work}/raw", data_dirs=[f"{work}/ssd", f"{work}/sd"], key_dir=f"{work}/key",
                state_dir=f"{work}/state", manage_services=False, interfaces=["eth1"], sysfs_net=f"{work}/nosys",
-               proc_swaps=f"{work}/noswaps", wan_tokens=True, raise_errors=True, require_ram_disk=False)
+               proc_swaps=f"{work}/noswaps", wan_tokens=True, raise_errors=True, require_ram_disk=False, require_key_mount=False, rtc_epoch="")
     os.makedirs(cfg["key_dir"])
+    with open(cfg["proc_swaps"], "w") as f:
+        f.write("Filename Type Size Used Priority\n")
     os.makedirs(os.path.join(cfg["raw_dir"], "eth1"))
     pipeline.init_key(cfg["key_dir"])
     with open(os.path.join(cfg["key_dir"], "armed.json"), "w") as f:

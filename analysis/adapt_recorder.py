@@ -12,19 +12,31 @@ pseudonym and never names remote hosts, so:
   peer_id    LAN: 'dev:<pseudonym>' (identity by MAC) or 'ip:<pseudonym>' (identity by address)
              WAN: one-way host token when the site allows it, else 'wc_<service type>'
   peer_addr  WAN: '<network token>.0', so that the /24 rule of incidence3.py yields the network token
-Two kinds of record need care:
-  handshake not seen   a TCP record without the opening SYN and without the answering SYN-ACK was
+Four kinds of record need care:
+  opener not seen   a TCP record without the opening SYN and without the answering SYN-ACK was
              picked up in the middle of a conversation (capture start, a restart, a long silence).
-             Who opened it is unknown, so dev_init is NULL and incidence3.py decides the role with
-             the rules it uses for flow exports. Such a record counts for a device only if the
-             device sent a packet in it other than a reset.
+             A UDP record that Zeek turned around ('^' in the history) began with a packet from a
+             server port: the answer to a question that was not captured, or to a question sent to
+             a group address. In both cases who opened the flow is unknown, so dev_init is NULL
+             and incidence3.py decides the role with the rules it uses for flow exports. Such a
+             record counts for a device only if the device sent a packet in it (for TCP: other
+             than a reset).
   open       an hourly report about a connection that is still open. It marks the flow as present
-             at that time. Its bytes are not added (the final record carries the totals).
-Days on which the recorder was down for more than an hour inside working hours are dropped.
+             at that time, for each side that sent a packet in that hour. Its bytes are not added
+             (the final record carries the totals).
+  no ports   protocols without ports (ICMP and others) have no roles, so the participation filter
+             of incidence3.py cannot work on them. Their record counts for the answering side only
+             if that side sent a packet. An ICMP error message gives its sender no flow type: it
+             is the refusal of somebody else's packet, as a reset is for TCP.
+  long       a finished record that ends in a later clock hour than it began counts for its opener
+             at the start. Who else sent on which day is taken from its hourly reports: the record
+             itself covers the whole life of the connection, not its first day.
+Days on which the recorder was down for more than an hour inside working hours are dropped. The
+working hours must be given: --hours none switches the rule off on purpose.
 
 Usage:
-  adapt_recorder.py <export_dir> <out.parquet> [--dataset NAME] [--tz Europe/Istanbul]
-                    [--hours "1-5=08:00-17:00,6=08:00-13:30"] [--group agentless] [--visibility full]
+  adapt_recorder.py <export_dir> <out.parquet> --hours "1-5=08:00-17:00,6=08:00-13:30"
+                    [--dataset NAME] [--tz Europe/Istanbul] [--group agentless] [--visibility full]
 Then:
   GT_ROLE=init GT_INPUTS="<out.parquet>|<tz>" python3 incidence3.py x x <inc_dir>
 """
@@ -40,12 +52,26 @@ SLACK_S = 5             # report times are whole seconds and the timer is not ex
 COLUMNS = {"ts": "BIGINT", "proto": "VARCHAR", "ipp": "INTEGER", "op": "INTEGER", "rp": "INTEGER", "os": "VARCHAR",
            "rs": "VARCHAR", "o": "VARCHAR", "r": "VARCHAR", "ob": "BIGINT", "rb": "BIGINT", "est": "BOOLEAN",
            "wc": "VARCHAR", "wh": "VARCHAR", "wn": "VARCHAR", "wd": "VARCHAR", "hist": "VARCHAR", "opk": "BIGINT",
-           "open": "BOOLEAN"}
+           "open": "BOOLEAN", "dur": "DOUBLE"}
 OPEN = "coalesce(open, false)"
-# handshake not seen: neither the originator's SYN (S) nor the responder's SYN-ACK (h) is in the history
-UNKNOWN = "(proto = 'tcp' AND NOT regexp_matches(coalesce(hist, ''), '[Sh]'))"
+# Who opened the flow is unknown. TCP: neither the originator's SYN (S) nor the responder's SYN-ACK (h) is in
+# the history. UDP: Zeek turned the record around (^), because its first packet came from a server port.
+UNKNOWN = ("((proto = 'tcp' AND NOT regexp_matches(coalesce(hist, ''), '[Sh]'))"
+           " OR (proto = 'udp' AND starts_with(coalesce(hist, ''), '^')))")
+# ICMP error messages (IPv4: destination unreachable, source quench, redirect, time exceeded, parameter
+# problem. IPv6: types 1 to 4). They are what a device sends back when it refuses or cannot deliver a packet of
+# somebody else, as a reset is for TCP. The sender of an error message did not take part: its record gives no
+# flow type. For ICMP the recorder writes the message type into the originator's port field.
+ICMP_ERROR = ("(proto = 'icmp' AND ((ipp = 1 AND op IN (3, 4, 5, 11, 12)) OR (ipp = 58 AND op BETWEEN 1 AND 4)))")
+# A finished record whose last packet lies in a later clock hour than its first. The recorder wrote a report for
+# every hour in which such a connection carried packets, so which side sent on which day is taken from the
+# reports. The finished record is stamped with the start and says only that the opener sent the first packet
+# then: its 'est' and its history cover the whole life of the connection, not the first day.
+CROSS = f"(NOT {OPEN} AND floor((ts + coalesce(dur, 0) - 0.001) / 3600) > floor(ts / 3600))"
 # the originator sent something other than a reset: in the reported hour, or anywhere in a finished record
-O_PART = f"(CASE WHEN {OPEN} THEN opk > 0 ELSE regexp_matches(coalesce(hist, ''), '[ADFH]') END)"
+O_PART = f"(CASE WHEN {OPEN} THEN opk > 0 ELSE regexp_matches(coalesce(hist, ''), '[ADFH]') AND NOT {CROSS} END)"
+# the responder took part: in the reported hour, or in a finished record that lies within one clock hour
+R_PART = f"(est AND NOT {CROSS})"
 
 
 def parse_hours(spec):
@@ -120,8 +146,16 @@ def outage_days(coverage_lines, tz, hours, limit_s=3600):
     return sorted(d for d, sec in down.items() if sec > limit_s), down
 
 
-def convert(src, out, dataset="siteA", tz="Europe/Istanbul", hours="", group="", visibility=""):
-    """Write the normalised rows of the export folder 'src' to the parquet file 'out'. Returns a summary."""
+def convert(src, out, dataset="siteA", tz="Europe/Istanbul", hours=None, group="", visibility=""):
+    """Write the normalised rows of the export folder 'src' to the parquet file 'out'. Returns a summary.
+
+    hours: the site's working hours for the outage rule, as on the command line. It has no default: the
+    caller must give the hours or say 'none', and then the summary says that the rule was not applied
+    ('outage_rule': False).
+    """
+    if hours is None:
+        raise ValueError("working hours not given: pass the site's hours, or 'none' to switch the outage rule off")
+    hours = "" if hours == "none" else hours
     import duckdb
 
     def load(name, default):
@@ -173,10 +207,17 @@ def convert(src, out, dataset="siteA", tz="Europe/Istanbul", hours="", group="",
                CASE WHEN {UNKNOWN} THEN NULL ELSE {init} END AS dev_init, nullif(wd, '') AS domain,
                CASE WHEN {OPEN} THEN 0 ELSE ob + rb END AS n_bytes, CAST({dev_pl} AS BIGINT) AS dev_pl,
                {OPEN} AS is_open, {UNKNOWN} AS no_handshake
-        FROM r WHERE {dev_scope} = 'lan' AND {dev} NOT IN (SELECT d FROM gw) AND (NOT {UNKNOWN} OR {took_part})"""
-    q = side("o", "os", "r", "rs", "op", "rp", "true", f"CASE WHEN {UNKNOWN} THEN greatest(ob, 1) ELSE ob END", O_PART) \
+        FROM r WHERE {dev_scope} = 'lan' AND {dev} NOT IN (SELECT d FROM gw) AND {took_part}"""
+    # The originator of a finished record whose opener was seen counts as it is. In a record whose opener
+    # was not seen, and in a report about an open connection, it must have sent a packet.
+    # The answering side of a record with ports and a known opener is kept even if it sent nothing:
+    # incidence3.py drops it per day, service and peer (participation filter). Without ports there are no
+    # roles for that filter, and without a known opener there is no answering side: it must have sent a packet.
+    q = side("o", "os", "r", "rs", "op", "rp", "true", f"CASE WHEN {UNKNOWN} THEN greatest(ob, 1) ELSE ob END",
+             f"((NOT {UNKNOWN} AND NOT {OPEN}) OR {O_PART}) AND NOT {ICMP_ERROR}") \
         + " UNION ALL " + \
-        side("r", "rs", "o", "os", "rp", "op", "false", "CASE WHEN est THEN greatest(rb, 1) ELSE 0 END", "est")
+        side("r", "rs", "o", "os", "rp", "op", "false", f"CASE WHEN {R_PART} THEN greatest(rb, 1) ELSE 0 END",
+             f"(({ported} AND NOT {UNKNOWN}) OR {R_PART})")
     where = f"WHERE CAST(timezone('{tz}', timezone('UTC', ts)) AS DATE) NOT IN (SELECT d FROM bad_day)"
     if keep is not None:
         table("keep", "VARCHAR", keep)
@@ -191,7 +232,7 @@ def convert(src, out, dataset="siteA", tz="Europe/Istanbul", hours="", group="",
     return {"records_in": n_in, "rows": s[0], "devices": s[1], "first": s[2], "last": s[3], "peer_wan": s[4],
             "peer_lan": s[5], "unanswered_inbound": s[6], "open_rows": s[7], "no_handshake_rows": s[8],
             "gateways": len(gateways), "device_filter": None if keep is None else len(keep),
-            "gap_days": len(down), "dropped_days": dropped, "keys": keys}
+            "gap_days": len(down), "dropped_days": dropped, "keys": keys, "outage_rule": bool(parse_hours(hours))}
 
 
 def main():
@@ -200,7 +241,9 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--dataset", default="siteA")
     ap.add_argument("--tz", default="Europe/Istanbul")
-    ap.add_argument("--hours", default="", help='working hours, for example "1-5=08:00-17:00,6=08:00-13:30"')
+    ap.add_argument("--hours", required=True,
+                    help='working hours for the outage rule, for example "1-5=08:00-17:00,6=08:00-13:30". '
+                         '"none" switches the rule off')
     ap.add_argument("--group", default="", help="keep only devices labelled with this group")
     ap.add_argument("--visibility", default="", help="keep only devices labelled with this visibility")
     a = ap.parse_args()
@@ -210,8 +253,11 @@ def main():
     print(f"peer wan {s['peer_wan']}, peer lan {s['peer_lan']}, unanswered inbound {s['unanswered_inbound']}")
     print(f"reports about open connections {s['open_rows']}, rows without a handshake {s['no_handshake_rows']}")
     print(f"gateways excluded {s['gateways']}, device filter {'none' if s['device_filter'] is None else s['device_filter']}")
-    print(f"days with capture gaps in working hours {s['gap_days']}, dropped (more than one hour) "
-          f"{len(s['dropped_days'])}: {s['dropped_days']}")
+    if s["outage_rule"]:
+        print(f"days with capture gaps in working hours {s['gap_days']}, dropped (more than one hour) "
+              f"{len(s['dropped_days'])}: {s['dropped_days']}")
+    else:
+        print("OUTAGE RULE NOT APPLIED (--hours none): no day is dropped for capture gaps")
     if len(s["keys"]) > 1:
         print(f"WARNING: the key stick was replaced during the recording ({len(s['keys'])} keys). Pseudonyms made with "
               "different keys do not match: the same device appears as several devices.")

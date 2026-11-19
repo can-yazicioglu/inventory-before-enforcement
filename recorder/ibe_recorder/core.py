@@ -28,8 +28,22 @@ _SOLICITED = ipaddress.ip_network("ff02::1:ff00:0/104")
 
 PORT_CATEGORY = {("udp", 53): "dns", ("tcp", 53): "dns", ("udp", 123): "time", ("udp", 67): "dhcp",
                  ("udp", 68): "dhcp", ("tcp", 853): "dns", ("udp", 5353): "mdns"}
+# The service types a remote host can carry. A service type is a word that leaves the site, so the list is
+# closed: rules, built in or from the key stick, can only assign domains to these words.
+CATEGORIES = ("dns", "time", "dhcp", "mdns", "os_update", "remote_access", "vendor_cloud", "connectivity_check",
+              "other", "unknown")
 
 _B32 = re.compile(r"^[a-z2-7]+$")
+
+# What Zeek can write into these fields. Anything else is not copied.
+PROTOCOLS = ("tcp", "udp", "icmp", "unknown_transport")
+CONN_STATES = ("S0", "S1", "SF", "REJ", "S2", "S3", "RSTO", "RSTR", "RSTOS0", "RSTRH", "SH", "SHR", "OTH")
+HISTORY_LETTERS = "ShADFRCGTWIQXZ"            # and their lower case forms, and ^
+SERVICES = frozenset("""dns ssl dtls quic http ftp ftp-data ssh smtp pop3 imap irc irc-data dhcp ntp snmp smb
+    dce_rpc gssapi krb krb_tcp ntlm rdp rfb sip syslog ldap ldap_tcp ldap_udp mysql postgresql modbus dnp3 mqtt
+    radius socks teredo ayiya gtpv1 vxlan geneve xmpp websocket ncp tftp netbios redis ssdp mdns""".split())
+_HIST = "[" + HISTORY_LETTERS + HISTORY_LETTERS.lower() + "^]"
+MAX_COUNT = 2 ** 53                            # exact in every JSON reader, far above any real counter
 
 
 class Pseudonymiser:
@@ -100,6 +114,24 @@ def is_group_mac(mac: str) -> bool:
         return False
 
 
+def nets_problem(local_nets):
+    """Why a list of local networks cannot be used, or None. A network wider than the widest private range
+    (10.0.0.0/8, fc00::/7) is refused: it would turn remote hosts into local ones, and a local host is named
+    by a token of its address in every record, which for remote hosts needs the site's written permission."""
+    for n in local_nets:
+        net = ipaddress.ip_network(n, strict=False)        # ValueError if it is not a network
+        if net.prefixlen < (8 if net.version == 4 else 7):
+            return "a local network is wider than /8 (IPv4) or /7 (IPv6)"
+    return None
+
+
+def public_nets(local_nets):
+    """How many of the local networks lie outside the private, link-local and shared ranges."""
+    return sum(1 for n in local_nets
+               if not any(ipaddress.ip_network(n, strict=False).subnet_of(d) for d in map(ipaddress.ip_network, DEFAULT_LOCAL_NETS)
+                          if d.version == ipaddress.ip_network(n, strict=False).version))
+
+
 class Scope:
     """Decides whether an address is local, remote, multicast or broadcast."""
 
@@ -116,11 +148,13 @@ class Scope:
             v = self._memo[ip] = a.is_unspecified or any(a.version == n.version and a in n for n in self.nets)
         return v
 
-    def of(self, ip: str, mac: str = "", gateways=frozenset()) -> str:
+    def of(self, ip: str, mac: str = "", *, on_link: bool = False) -> str:
         """lan | wan | mcast | bcast.
 
-        An address outside the configured local networks still counts as local when the frame
-        carries the MAC address of an ordinary device (not a known gateway). This covers sites
+        An address outside the configured local networks is remote, whatever MAC address the frame
+        carries: a frame on its way to the internet carries the MAC address of a router, and a
+        router is not always known as one. The exception is an address that the devices themselves
+        place on the local link (on_link: seen in ARP or IPv6 neighbour discovery). This covers sites
         that use public IPv4 space or global IPv6 addresses inside.
         """
         a = _ip(ip)
@@ -128,11 +162,111 @@ class Scope:
             return "mcast"
         if a.version == 4 and (str(a) == "255.255.255.255" or (mac and norm_mac(mac) == "f" * 12)):
             return "bcast"
-        if self.is_local_ip(ip):
-            return "lan"
-        if mac and not is_group_mac(mac) and norm_mac(mac) not in gateways:
+        if self.is_local_ip(ip) or on_link:
             return "lan"
         return "wan"
+
+
+@functools.lru_cache(maxsize=200000)
+def _norm_ip(ip: str) -> str:
+    return str(_ip(ip))
+
+
+def _finite(t) -> bool:
+    """A number that a float can hold. A whole number of 400 digits is a number in JSON, and is not one here."""
+    try:
+        return isinstance(t, (int, float)) and not isinstance(t, bool) and math.isfinite(t)
+    except OverflowError:
+        return False
+
+
+class Neighbours:
+    """Which MAC address answers for which IP address on the local link, as the devices tell each
+    other in ARP and IPv6 neighbour discovery (zeek/ibe.zeek, neigh.log).
+
+    Used where a frame does not carry the MAC address of the device itself: a frame that reached
+    the capture port through a router carries the router's. The table holds real addresses. It is
+    kept on the key stick and never leaves the site.
+
+    table: {ip: [[mac, first seen, last seen], ...]}, oldest owner first.
+    """
+    KEEP = 4                    # owners remembered per address
+    CAP = 50000                 # addresses
+    FORGET_S = 35 * 86400       # an address not seen for this long is forgotten
+
+    def __init__(self, table=None):
+        self.table = {}
+        for ip, owners in (table.items() if isinstance(table, dict) else ()):
+            good = []
+            for e in owners if isinstance(owners, list) else ():
+                if isinstance(e, list) and len(e) == 3 and isinstance(e[0], str) and re.fullmatch(r"[0-9a-f]{12}", e[0]) \
+                        and all(_finite(t) for t in e[1:]):
+                    good.append([e[0], float(e[1]), float(e[2])])
+            try:
+                if good and isinstance(ip, str) and _norm_ip(ip) == ip:
+                    self.table[ip] = sorted(good, key=lambda e: e[1])[-self.KEEP:]
+            except ValueError:
+                continue
+
+    def see(self, ts, ip, mac) -> bool:
+        """One sighting. Returns False if it is not a usable pair of a unicast address and a device MAC."""
+        if not isinstance(ip, str) or not isinstance(mac, str) or isinstance(ts, bool):
+            return False
+        try:
+            ts = float(ts)
+            a = _ip(ip)
+            m = norm_mac(mac)
+        except (ValueError, TypeError, OverflowError):
+            return False
+        if not (0 < ts < 1e11) or a.is_multicast or a.is_unspecified or a.is_loopback \
+                or str(a) == "255.255.255.255" or is_group_mac(m) or m == "0" * 12:
+            return False
+        owners = self.table.setdefault(str(a), [])
+        if owners and owners[-1][0] == m:
+            owners[-1][1], owners[-1][2] = min(owners[-1][1], ts), max(owners[-1][2], ts)
+        else:
+            owners.append([m, ts, ts])
+            owners.sort(key=lambda e: e[1])
+            del owners[:-self.KEEP]
+        return True
+
+    def _entry(self, ip, ts):
+        owners = self.table.get(ip)
+        if owners is None:
+            try:
+                owners = self.table.get(_norm_ip(ip))
+            except (ValueError, TypeError):
+                return None
+        if not owners:
+            return None
+        best = owners[0]            # before the first sighting: the first owner known
+        for e in owners:
+            if e[1] <= ts + 1:
+                best = e
+        return best
+
+    def at(self, ip, ts):
+        """The MAC address (12 hex digits) that answered for this address at that time, or None."""
+        e = self._entry(ip, ts)
+        return e[0] if e else None
+
+    def live_at(self, ip, ts, within=3600):
+        """As at(), but only if that MAC address was seen with the address around that time."""
+        e = self._entry(ip, ts)
+        return e[0] if e and e[1] <= ts + 1 and e[2] >= ts - within else None
+
+    def owned_by(self, ip, mac) -> bool:
+        """True if this MAC address ever answered for the address."""
+        e = self.table.get(ip) or []
+        return any(x[0] == mac for x in e)
+
+    def dump(self, now):
+        """The table to store: old addresses forgotten, the most recently seen kept if there are too many."""
+        live = {ip: v for ip, v in self.table.items() if v and v[-1][2] >= now - self.FORGET_S}
+        if len(live) > self.CAP:
+            keep = sorted(live, key=lambda ip: live[ip][-1][2])[-self.CAP:]
+            live = {ip: live[ip] for ip in keep}
+        return live
 
 
 def group_label(ip: str, pz: Pseudonymiser) -> str:
@@ -171,8 +305,8 @@ class PublicSuffix:
         if not isinstance(name, str):
             return None
         name = name.lower().rstrip(".")
-        if not name or name.replace(".", "").isdigit() or ":" in name:
-            return None
+        if not name or len(name) > 253 or name.replace(".", "").isdigit() or ":" in name:
+            return None                    # longer than any DNS name: not a name, and costly to take apart
         labels = name.split(".")
         for i in range(len(labels)):
             cand = ".".join(labels[i:])
@@ -193,8 +327,8 @@ class Categoriser:
             line = line.strip()
             if line and not line.startswith("#") and "," in line:
                 suffix, cat = [x.strip().lower() for x in line.split(",")[:2]]
-                if not re.fullmatch(r"[a-z_]{2,24}", cat):
-                    raise ValueError(f"bad category {cat!r}")
+                if cat not in CATEGORIES:
+                    raise ValueError("a category that is not one of the built-in ones")
                 self.rules[suffix] = cat
 
     def category(self, domain, proto: str, port):
@@ -224,6 +358,9 @@ def established(rec: dict, is_open: bool = False) -> bool:
     so there the responder must also have sent a packet in that interval.
     """
     answered = _int(rec.get("resp_pkts")) > 0 or _int(rec.get("resp_bytes")) > 0
+    if is_open:
+        # packets only: the bytes of a report include those of a packet that is held back for the next report
+        answered = _int(rec.get("resp_pkts")) > 0
     if rec.get("proto") == "tcp":
         took_part = any(c in "hadf" for c in str(rec.get("history") or ""))
         return took_part and (answered or not is_open)
@@ -231,16 +368,18 @@ def established(rec: dict, is_open: bool = False) -> bool:
 
 
 def transform(rec: dict, pz: Pseudonymiser, scope: Scope, gateways: set, wan_tokens: bool,
-              ip2dom: dict, psl: PublicSuffix, cat: Categoriser, iface: int = 0, is_open: bool = False):
+              ip2dom: dict, psl: PublicSuffix, cat: Categoriser, iface: int = 0, is_open: bool = False,
+              neigh: "Neighbours | None" = None):
     """Turn one Zeek conn record into an anonymised record, or (None, reason) if it is dropped.
 
     is_open marks a report about a connection that is still open (see zeek/ibe.zeek): its time is
     that of the last packet and its counts cover the time since the previous report.
 
     Local endpoints are named by the pseudonym of their MAC address. If the frame came through a
-    router (gateway MAC) the IP address is used instead and the record says so in 'ib'.
-    Remote endpoints are never named: they get a service type and, only when wan_tokens is on,
-    one-way tokens for the host, its /24 (or /48) and its registrable domain.
+    router (gateway MAC) the device is named by the MAC address that answers for its IP address on
+    the local link (neigh), and only if none is known by the IP address: the record then says so
+    in 'ib'. Remote endpoints are never named: they get a service type and, only when wan_tokens
+    is on, one-way tokens for the host, its /24 (or /48) and its registrable domain.
     """
     try:
         oh, rh = rec["id.orig_h"], rec["id.resp_h"]
@@ -250,35 +389,46 @@ def transform(rec: dict, pz: Pseudonymiser, scope: Scope, gateways: set, wan_tok
         for mac in (omac, rmac):
             if mac:
                 norm_mac(mac)
-        os_, rs_ = scope.of(oh, omac, gateways), scope.of(rh, rmac, gateways)
         ts, dur = float(rec["ts"]), float(rec.get("duration") or 0)
-        if not (ts > 0 and math.isfinite(ts) and math.isfinite(dur)):
+        if not (0 < ts < 1e11 and math.isfinite(dur)):          # 1e11 is the year 5138, also excludes inf and nan
             raise ValueError("time")
-    except (KeyError, ValueError, TypeError, AttributeError):
+
+        def side_scope(ip, mac):
+            found = scope.of(ip, mac)
+            if found == "wan" and neigh is not None and neigh.at(ip, ts):
+                return "lan"                    # an address outside the local networks, but on the local link
+            return found
+        os_, rs_ = side_scope(oh, omac), side_scope(rh, rmac)
+    except (KeyError, ValueError, TypeError, AttributeError, OverflowError):
         return None, "malformed"
     if os_ in ("mcast", "bcast"):
         return None, "group_source"
     if os_ == "wan" and rs_ != "lan":
         return None, "no_local_endpoint"
     proto = str(rec.get("proto") or "").lower()
-    if not re.fullmatch(r"[a-z0-9_]{2,20}", proto):
+    if proto not in PROTOCOLS:
         return None, "malformed"
-    op, rp = _int(rec.get("id.orig_p"), -1), _int(rec.get("id.resp_p"), -1)
+    op, rp = _port(rec.get("id.orig_p")), _port(rec.get("id.resp_p"))
     out = {"ts": int(ts), "dur": round(dur, 3),
            "proto": proto, "op": op, "rp": rp, "os": os_, "rs": rs_,
-           "st": _word(rec.get("conn_state"), 8), "hist": _word(rec.get("history"), 32, r"[A-Za-z^]"),
-           "svc": _word(rec.get("service"), 24, r"[a-z0-9_,\-]"),
-           "ob": _int(rec.get("orig_bytes")), "rb": _int(rec.get("resp_bytes")),
-           "opk": _int(rec.get("orig_pkts")), "rpk": _int(rec.get("resp_pkts")),
-           "est": established(rec, is_open), "vlan": _int(rec.get("vlan"), -1), "if": iface, "ib": "",
-           "ipp": _int(rec.get("ip_proto"), -1)}
+           "st": rec.get("conn_state") if rec.get("conn_state") in CONN_STATES else "",
+           "hist": _word(rec.get("history"), 32, _HIST), "svc": _services(rec.get("service")),
+           "ob": _count(rec.get("orig_bytes")), "rb": _count(rec.get("resp_bytes")),
+           "opk": _count(rec.get("orig_pkts")), "rpk": _count(rec.get("resp_pkts")),
+           "est": established(rec, is_open), "vlan": _ranged(rec.get("vlan"), 0, 4095), "if": iface, "ib": "",
+           "ipp": _ranged(rec.get("ip_proto"), 0, 255)}
+    if not 0 <= dur < 4e8:
+        out["dur"] = 0.0
     if is_open:
         out["open"] = True
 
     def local(ip, mac, side):
         if mac and not is_group_mac(mac) and norm_mac(mac) not in gateways:
-            return pz.device(mac)
-        out["ib"] += side            # identity based on IP for this side
+            return pz.device(mac)        # the frame itself carries the device's MAC address
+        owner = neigh.at(ip, ts) if neigh is not None else None
+        if owner:
+            return pz.device(owner)      # through a router, but the device is known on a mirrored network
+        out["ib"] += side                # identity based on IP for this side
         return pz.device_by_ip(ip)
 
     out["o"] = local(oh, omac, "o") if os_ == "lan" else "wan"
@@ -299,6 +449,25 @@ def transform(rec: dict, pz: Pseudonymiser, scope: Scope, gateways: set, wan_tok
     return out, None
 
 
+def _ranged(v, lo, hi, default=-1):
+    v = _int(v, default) if not isinstance(v, bool) else default
+    return v if lo <= v <= hi else default
+
+
+def _port(v):
+    return _ranged(v, 0, 65535)
+
+
+def _count(v):
+    return _ranged(v, 0, MAX_COUNT, 0)
+
+
+def _services(v):
+    """Zeek's service names, comma separated. A name Zeek does not have is left out."""
+    names = [x for x in str(v or "").split(",") if x in SERVICES]
+    return ",".join(names)[:24] if names else ""
+
+
 def _word(v, maxlen, charset=r"[A-Za-z0-9]"):
     s = str(v or "")
     return s[:maxlen] if re.fullmatch(charset + "*", s[:maxlen]) else ""
@@ -307,28 +476,36 @@ def _word(v, maxlen, charset=r"[A-Za-z0-9]"):
 # ---------------------------------------------------------------- leak check
 
 _LEAK_PATTERNS = (
-    ("ipv4", re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")),
+    # no dot in the look-around: an address at the end of a sentence ("... 192.168.1.20.") is an address too
+    ("ipv4", re.compile(r"(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)")),
     ("mac", re.compile(r"(?i)(?<![0-9a-f])(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}(?![0-9a-f])")),
     ("ipv6", re.compile(r"(?i)(?<![0-9a-f:])(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{1,4}(?![0-9a-f:])|::[0-9a-f]{1,4}|[0-9a-f]{1,4}::")),
 )
 _ALLOWED = {
-    "proto": re.compile(r"[a-z0-9_]{2,20}"), "os": re.compile(r"lan|wan"), "rs": re.compile(r"lan|wan|mcast|bcast"),
+    "proto": re.compile("|".join(PROTOCOLS)), "os": re.compile(r"lan|wan"), "rs": re.compile(r"lan|wan|mcast|bcast"),
     "o": re.compile(r"wan|[di][a-z2-7]{10}"),
-    "r": re.compile(r"wan|bcast|[di][a-z2-7]{10}|mcast:(?:[a-z0-9]{2,12}|og[a-z2-7]{8})"),
-    "st": re.compile(r"[A-Za-z0-9]{0,8}"), "hist": re.compile(r"[A-Za-z^]{0,32}"),
-    "svc": re.compile(r"[a-z0-9_,\-]{0,24}"), "ib": re.compile(r"o?r?"),
-    "wc": re.compile(r"[a-z_]{2,24}"), "wh": re.compile(r"h[a-z2-7]{10}"), "wn": re.compile(r"n[a-z2-7]{10}"),
+    "r": re.compile(r"wan|bcast|[di][a-z2-7]{10}|mcast:(?:%s|sn|og[a-z2-7]{8})" % "|".join(sorted(set(GROUP_LABELS.values())))),
+    "st": re.compile("|".join(CONN_STATES) + "|"), "hist": re.compile(_HIST + "{0,32}"),
+    "svc": re.compile(r"(?:(?:%s)(?:,(?!$)|$))*" % "|".join(sorted(SERVICES, key=len, reverse=True))), "ib": re.compile(r"o?r?"),
+    "wc": re.compile("|".join(CATEGORIES)), "wh": re.compile(r"h[a-z2-7]{10}"), "wn": re.compile(r"n[a-z2-7]{10}"),
     "wd": re.compile(r"(?:m[a-z2-7]{10})?"),
 }
-_NUMERIC = {"ts", "dur", "op", "rp", "ob", "rb", "opk", "rpk", "vlan", "if", "ipp"}
+# the range transform() gives each number. Only the duration has a fraction.
+_NUMERIC = {"ts": (1, 10 ** 11), "dur": (0, 4e8), "op": (-1, 65535), "rp": (-1, 65535), "ob": (0, MAX_COUNT),
+            "rb": (0, MAX_COUNT), "opk": (0, MAX_COUNT), "rpk": (0, MAX_COUNT), "vlan": (-1, 4095), "if": (0, 255),
+            "ipp": (-1, 255)}
 
 
-def leak_check(record: dict):
-    """Return None if the record is safe to write, else a short reason. Unknown fields are refused."""
+def leak_check(record: dict, categories=None):
+    """Return None if the record is safe to write, else a short reason. Unknown fields are refused.
+    categories: the service types that may be written (wc). Without it any lower-case word passes."""
     for k, v in record.items():
         if k in _NUMERIC:
-            if isinstance(v, bool) or not isinstance(v, (int, float)):
-                return f"field {k} is not numeric"
+            lo, hi = _NUMERIC[k]
+            if isinstance(v, bool) or not isinstance(v, (int, float) if k == "dur" else int) or not lo <= v <= hi:
+                return f"field {k} is not numeric or out of range"
+        elif k == "wc" and categories is not None and v not in categories:
+            return f"field {k} has an unexpected value"
         elif k in ("est", "open"):
             if not isinstance(v, bool):
                 return f"field {k} is not boolean"

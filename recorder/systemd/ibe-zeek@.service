@@ -1,28 +1,29 @@
 [Unit]
 Description=IBE recorder: Zeek on %i (raw logs in RAM only)
 After=network.target local-fs.target
-# capture only when the key stick is present, recording is armed and the limit is not reached
-ConditionPathExists=/mnt/ibe-key/hmac.key
-ConditionPathExists=/mnt/ibe-key/armed.json
+# Capture only when the key stick is present, recording is armed and the limit is not reached: the
+# preflight command below checks all three. They are not checked here with ConditionPathExists=, because
+# systemd itself never triggers its own automount: it would find the key folder empty whenever the stick
+# has been idle for a minute, and would then neither start capture at boot nor restart it after a crash.
 ConditionPathExists=!/var/lib/ibe/STOP
 
 [Service]
 Type=simple
 Environment=PYTHONPATH=/opt/ibe
-# the same checks again, plus the clock. Exit status 3 means: not allowed, do not retry
-ExecStartPre=/usr/bin/python3 -m ibe_recorder --config /etc/ibe/config.json preflight
+# the same checks again, plus the clock. A refusal (exit status 3) skips the start: no failure, no retry
+ExecCondition=/usr/bin/python3 -m ibe_recorder --config /etc/ibe/config.json preflight
 ExecStartPre=/usr/bin/mkdir -p /run/ibe/raw/%i
 # nothing may leave through a capture interface: load the drop rule first, then bring the link up
 ExecStartPre=/usr/sbin/nft -f /etc/ibe/egress-%i.nft
 ExecStartPre=/usr/sbin/ip link set %i up promisc on arp off
 ExecStartPre=-/usr/sbin/ethtool -K %i rx off tx off sg off tso off gso off gro off lro off rxvlan off txvlan off
-WorkingDirectory=/run/ibe/raw/%i
-ExecStart=/opt/zeek/bin/zeek -b -C -i %i /opt/ibe/zeek/ibe.zeek
+# Zeek writes its logs into the directory it is started in. WorkingDirectory= cannot be used for that: systemd
+# enters it before the first command above, when the directory does not exist yet, and the start fails.
+ExecStart=/usr/bin/env --chdir=/run/ibe/raw/%i /opt/zeek/bin/zeek -b -C -i %i /opt/ibe/zeek/ibe.zeek
 # a memory dump of this process would hold raw packets
 LimitCORE=0
 Restart=on-failure
 RestartSec=30
-RestartPreventExitStatus=3
 Nice=-5
 
 [Install]

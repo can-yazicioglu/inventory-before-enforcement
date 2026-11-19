@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 
 from . import core
 
-VERSION = "0.4.0"
+VERSION = "0.6.0"
 MIN_EPOCH = 1793491200          # 2026-11-01 UTC. A clock before this date was never set.
 DEFAULTS = {
     "site": "A",
@@ -36,8 +36,10 @@ DEFAULTS = {
     "local_nets": list(core.DEFAULT_LOCAL_NETS),
     "gateway_macs": [],
     "gateway_learn_threshold": 16,
+    "gateway_forward_threshold": 2,
     "wan_tokens": False,
     "max_recording_days": 112,
+    "max_calendar_days": 365,          # recording ends for good this many days after its first day
     "timezone": "Europe/Istanbul",
     "manage_services": True,
     "auto_init_key": False,
@@ -47,13 +49,23 @@ DEFAULTS = {
     "sysfs_block": "/sys/block",
     "proc_mounts": "/proc/mounts",
     "require_ram_disk": True,
+    "require_key_mount": True,
+    "rtc_epoch": "/sys/class/rtc/rtc0/since_epoch",
     "export_recipient": "",
     "led": "",
     "raise_errors": False,
 }
-STEMS = ("conn", "open_conn", "dns", "ssl", "capture_loss", "stats")
+MAX_DEVICES_SEEN = 20000                    # pseudonyms listed in status.json (17 bytes each)
+STEMS = ("conn", "open_conn", "dns", "ssl", "capture_loss", "stats", "neigh")
 ACTIVE = {s + ".log" for s in STEMS}        # the logs Zeek is still writing
 LABEL_OK = re.compile(r"[A-Za-z0-9 _+/().\-]{0,40}")
+# Brand and model are free text. On top of the address scan these shapes are refused: four groups of digits with
+# any separator, eight digits in a row, twelve hexadecimal digits with or without separators (also in groups of
+# four), a dot followed by a letter (a host or domain name). The name of a person or a room cannot be recognised
+# by a pattern: the site reads devices.json before it hands the data over.
+ADDRESS_LIKE = re.compile(r"(?:\d{1,3}[^0-9A-Za-z]){3}\d{1,3}|\d{8}|(?:[0-9A-Fa-f]{2}[^0-9A-Za-z]?){5}[0-9A-Fa-f]{2}"
+                          r"|(?:[0-9A-Fa-f]{4}[^0-9A-Za-z]){2}[0-9A-Fa-f]{4}|\.[A-Za-z]")
+SWITCH_OK = re.compile(r"[A-Za-z0-9]{0,3}")          # "a letter for the switch"
 VOCAB = {
     "type": {"", "pc", "server", "vm", "ip_phone", "printer", "camera", "nvr", "storage", "medical_device",
              "medical_pc", "switch", "firewall", "access_point", "other"},
@@ -67,7 +79,9 @@ def load_config(path=None):
     """Defaults, overridden by the file. A file that cannot be read as a JSON object is reported by
     config_problem, so that the recorder stops cleanly instead of failing half way."""
     cfg = dict(DEFAULTS)
-    if path and os.path.exists(path):
+    if path and not os.path.exists(path):
+        cfg["config_unreadable"] = True     # a missing file must not mean: record with the built-in settings
+    elif path:
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
@@ -91,15 +105,36 @@ def read_log(path):
                     continue
 
 
-def completed(cfg):
+def completed(cfg, stopped=False):
     """Every raw file that Zeek has finished, per capture port: [(port number, path)].
 
     A run reads exactly these files and deletes exactly these files. A log that Zeek completes while
     the run is busy is left for the next run instead of being deleted unread.
+    stopped: capture has just been stopped, so the logs with the open names are complete as well.
     """
     return [(n, p) for n, i in enumerate(cfg["interfaces"])
             for p in sorted(glob.glob(os.path.join(cfg["raw_dir"], i, "*")))
-            if os.path.isfile(p) and os.path.basename(p) not in ACTIVE]
+            if os.path.isfile(p) and (stopped or os.path.basename(p) not in ACTIVE or _abandoned(p))]
+
+
+def clock_step(st, now):
+    """Seconds by which the system clock was moved since the last run, measured against the clock that
+    cannot be set. 0 if that is not known (first run, or the device was restarted in between)."""
+    mono, prev = time.monotonic(), st.get("clock_ref")
+    st["clock_ref"] = [now, round(mono, 1)]
+    if isinstance(prev, list) and len(prev) == 2 and all(isinstance(x, (int, float)) and not isinstance(x, bool)
+                                                         and math.isfinite(x) for x in prev) and mono >= prev[1]:
+        return (now - prev[0]) - (mono - prev[1])
+    return 0.0
+
+
+def _abandoned(path, after_s=7500):
+    """An open log that has not been written for more than two rotation intervals. A running Zeek rotates
+    every hour, so the capture process that wrote this file is gone and the file is complete."""
+    try:
+        return time.time() - os.path.getmtime(path) > after_s
+    except OSError:
+        return False
 
 
 def of_kind(files, stem):
@@ -113,6 +148,37 @@ def _remove(path):
         os.remove(path)
     except FileNotFoundError:
         pass
+
+
+ZEEK_FILE = re.compile(r"(?:\.shadow\.)?(?:%s)\..*" % "|".join(STEMS))
+
+
+def stray_dirs(cfg):
+    """Folders in the raw directory that hold Zeek logs and are not capture folders of the configuration:
+    a capture process for a port that the configuration does not name. Nobody would read or delete its logs.
+
+    Looked for only where the raw directory is a RAM disk. With a wrong path the folders found there are
+    not the recorder's to touch.
+    """
+    if not isinstance(cfg.get("proc_mounts", ""), str) \
+            or not on_ram_disk(cfg["raw_dir"], cfg.get("proc_mounts", "/proc/mounts")):
+        return []
+    try:
+        found = [n for n in sorted(os.listdir(cfg["raw_dir"]))
+                 if not n.startswith(".") and n not in cfg["interfaces"] and os.path.isdir(os.path.join(cfg["raw_dir"], n))]
+    except OSError:
+        return []
+    return [n for n in found if _zeek_files(cfg, n)]
+
+
+def _zeek_files(cfg, folder):
+    """The files in a folder of the raw directory that have the name of a Zeek log. Nothing else in a folder
+    that the configuration does not name is ever deleted."""
+    try:
+        return [os.path.join(cfg["raw_dir"], folder, n) for n in os.listdir(os.path.join(cfg["raw_dir"], folder))
+                if ZEEK_FILE.fullmatch(n) and os.path.isfile(os.path.join(cfg["raw_dir"], folder, n))]
+    except OSError:
+        return []
 
 
 def purge_raw(cfg, everything=False, only=None):
@@ -129,6 +195,9 @@ def purge_raw(cfg, everything=False, only=None):
             for p in glob.glob(os.path.join(cfg["raw_dir"], i, ".shadow.*")):
                 _remove(p)
     if everything:
+        for i in stray_dirs(cfg):
+            for p in _zeek_files(cfg, i):
+                _remove(p)
         _remove(os.path.join(cfg["raw_dir"], "ip2dom.json"))
 
 
@@ -139,7 +208,7 @@ def load_key(key_dir):
             key = bytes.fromhex(f.read().strip())
     except (OSError, ValueError):
         return None
-    return key if len(key) >= 32 else None
+    return key if len(key) >= 32 and len(set(key)) >= 8 else None
 
 
 def key_id(key):
@@ -167,7 +236,22 @@ def is_armed(key_dir):
 def config_problem(cfg):
     """Return None if the configuration can be used, else which entry is wrong."""
     if cfg.get("config_unreadable"):
-        return "the file is not valid JSON"
+        return "the file is missing or is not valid JSON"
+    unknown = sorted(set(cfg) - set(DEFAULTS) - {"min_free_gb", "extensions"})
+    if unknown:                            # a misspelt name would leave the built-in value in force
+        # the name is typed by a person and this text goes into status.json: letters only, and only if it is short
+        name = str(unknown[0])
+        return "unknown entry " + (name if re.fullmatch(r"[a-z_]{1,30}", name) else f"number {sorted(cfg).index(unknown[0]) + 1}")
+    for k in ("wan_tokens", "manage_services", "auto_init_key", "require_ram_disk", "require_key_mount", "raise_errors"):
+        if not isinstance(cfg.get(k), bool):
+            return k                       # "false" in quotes is a text, and a text counts as yes
+    for k in ("gateway_learn_threshold", "gateway_forward_threshold", "dedup_window_s", "min_free_gb"):
+        v = cfg.get(k, 2)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not v >= 0:
+            return k
+    for k in ("export_recipient", "led", "sysfs_net", "proc_swaps", "sysfs_block", "proc_mounts", "rtc_epoch"):
+        if not isinstance(cfg.get(k), str):
+            return k
     for k in ("raw_dir", "key_dir", "state_dir", "site"):
         if not (isinstance(cfg.get(k), str) and cfg[k]):
             return k
@@ -180,12 +264,21 @@ def config_problem(cfg):
     for k in ("interfaces", "data_dirs"):
         if not _str_list(cfg.get(k)):
             return k
-    days = cfg.get("max_recording_days")
-    if isinstance(days, bool) or not isinstance(days, int) or days < 1:
-        return "max_recording_days"
+    # Everything below the raw log directory is deleted every hour. No other folder of the recorder may lie
+    # in it, which is what a mistyped path (the folder above the key stick and the data disk) would amount to.
+    raw = os.path.abspath(cfg["raw_dir"]).rstrip("/") + "/"
+    for other in [cfg["key_dir"], cfg["state_dir"]] + cfg["data_dirs"]:
+        if (os.path.abspath(other).rstrip("/") + "/").startswith(raw):
+            return "raw_dir"
+    for k in ("max_recording_days", "max_calendar_days"):
+        days = cfg.get(k)
+        if isinstance(days, bool) or not isinstance(days, int) or days < 1:
+            return k
     try:
         core.Scope(cfg["local_nets"])
         [core.norm_mac(m) for m in cfg["gateway_macs"]]
+        if core.nets_problem(cfg["local_nets"]):
+            return "local_nets: " + core.nets_problem(cfg["local_nets"])
     except (ValueError, TypeError):
         return "local_nets or gateway_macs"
     return None
@@ -210,7 +303,100 @@ def _usable(cfg):
         cfg["interfaces"] = found
     if not _str_list(cfg.get("data_dirs")):
         cfg.update(data_dirs=[os.path.join(cfg["state_dir"], "anon")], export_recipient="")
+    for k in ("export_recipient", "led"):
+        if not isinstance(cfg.get(k), str):
+            cfg[k] = ""
+    if isinstance(cfg.get("min_free_gb", 2), bool) or not isinstance(cfg.get("min_free_gb", 2), (int, float)):
+        cfg.pop("min_free_gb", None)
     return cfg
+
+
+def state_writable(state_dir):
+    """The day count and the STOP mark live in this directory. If they cannot be saved the limit cannot be kept."""
+    probe = os.path.join(state_dir, ".write-test")
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        with open(probe, "wb") as f:
+            f.write(b"x" * 4096)
+            f.flush()
+            os.fsync(f.fileno())
+        os.remove(probe)
+        return True
+    except OSError:
+        return False
+
+
+def known_days(cfg, st):
+    """Every recording day counted so far, from the state file and from every copy of the status (key stick,
+    data directories). A state file that was lost, damaged or could not be updated cannot restart the count."""
+    days = set()
+    copies = [_json_state(os.path.join(d, "status.json"), {}) for d in [cfg["key_dir"]] + list(cfg["data_dirs"])]
+    for src in [st] + copies:
+        got = src.get("days") if isinstance(src, dict) else None
+        if isinstance(got, list):
+            days.update(x for x in got if isinstance(x, str) and _is_date(x))
+    return sorted(days)
+
+
+def _is_date(text):
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return False
+    try:
+        datetime.date.fromisoformat(text)
+        return True
+    except ValueError:
+        return False
+
+
+def last_day_allowed(days, max_calendar_days):
+    """The last date on which records may be written: the first recording day plus the permitted span."""
+    first = datetime.date.fromisoformat(min(days))
+    try:
+        return (first + datetime.timedelta(days=max_calendar_days - 1)).isoformat()
+    except OverflowError:
+        return "9999-12-31"
+
+
+def known_batches(cfg, st):
+    """The number of hourly batches written so far, the largest value any copy of the status holds."""
+    copies = [_json_state(os.path.join(d, "status.json"), {}) for d in [cfg["key_dir"]] + list(cfg["data_dirs"])]
+    counts = [src.get("files") for src in [st] + copies if isinstance(src, dict)]
+    return max([c for c in counts if isinstance(c, int) and not isinstance(c, bool) and c >= 0] + [0])
+
+
+def on_stick(path, mounts="/proc/mounts"):
+    """True if the path is itself the mount point of a real file system. The placeholder of an automount
+    with no stick behind it, and a plain folder on the system disk, are not."""
+    path, kind = os.path.realpath(path), None
+    try:
+        os.listdir(path)                    # a stick that is plugged in but idle is mounted by the first access
+    except OSError:
+        pass                                # no stick behind the automount point: the list below says so
+    try:
+        with open(mounts, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3 and parts[1].replace("\\040", " ") == path:
+                    kind = parts[2]                 # a later line is mounted on top of an earlier one
+    except OSError:
+        return False
+    return kind is not None and kind != "autofs"
+
+
+def key_dir_ok(cfg):
+    return not cfg.get("require_key_mount", True) or on_stick(cfg["key_dir"], cfg.get("proc_mounts", "/proc/mounts"))
+
+
+def clock_battery_ok(cfg):
+    """False if the hardware clock itself reports a time before this software existed: its battery is
+    empty or missing, and the system time after a power cut is only the last time that was saved."""
+    if cfg.get("rtc_epoch", "") == "":
+        return True                                 # switched off on purpose: a machine without a hardware clock
+    try:
+        with open(cfg["rtc_epoch"], encoding="ascii") as f:
+            return int(f.read().strip()) >= MIN_EPOCH
+    except (OSError, ValueError):
+        return False                                # a hardware clock that cannot be read is no clock
 
 
 def preflight(cfg, now=None):
@@ -219,7 +405,7 @@ def preflight(cfg, now=None):
     bad = config_problem(cfg)
     if bad:
         return "the configuration is wrong: " + bad
-    if now < MIN_EPOCH:
+    if now < MIN_EPOCH or not clock_battery_ok(cfg):
         return "clock is not set"
     if cfg.get("require_ram_disk", True) and not on_ram_disk(cfg["raw_dir"], cfg.get("proc_mounts", "/proc/mounts")):
         return "the raw log directory is not in RAM"
@@ -227,7 +413,9 @@ def preflight(cfg, now=None):
         return "swap to disk is on"        # raw logs live in RAM and must not be paged out to a disk
     if os.path.exists(os.path.join(cfg["state_dir"], "STOP")):
         return "recording limit reached"
-    if load_key(cfg["key_dir"]) is None:
+    if not state_writable(cfg["state_dir"]):
+        return "the state directory cannot be written"      # the day count could not be saved: no recording
+    if not key_dir_ok(cfg) or load_key(cfg["key_dir"]) is None:
         return "key stick missing"
     if not is_armed(cfg["key_dir"]):
         return "not armed"
@@ -263,8 +451,13 @@ def dedup(records, window, gateways=frozenset()):
 
     seen, out, dropped = {}, [], 0
     for iface, r in sorted(records, key=lambda x: _float(x[1].get("ts"))):
-        k = (r.get("proto"), r.get("id.orig_h"), r.get("id.orig_p"), r.get("id.resp_h"), r.get("id.resp_p"),
-             bool(r.get("_open")))
+        # a request from the unspecified address (DHCP, duplicate address detection) has the same addresses and
+        # ports whichever device sends it: there the sender's MAC address tells two devices from two copies
+        # Flows without ports of two different IP protocols share the word 'unknown_transport' and the ports 0.
+        ipp = r.get("ip_proto")
+        k = (r.get("proto"), ipp if isinstance(ipp, int) else None, r.get("id.orig_h"), r.get("id.orig_p"),
+             r.get("id.resp_h"), r.get("id.resp_p"), bool(r.get("_open")),
+             str(r.get("orig_l2_addr") or "").lower() if r.get("id.orig_h") in ("0.0.0.0", "::") else None)
         ts = _float(r.get("ts"))
         j = seen.get(k)
         if j is not None and out[j][0] != iface and ts - _float(out[j][1].get("ts")) <= window:
@@ -285,22 +478,66 @@ def _float(v):
     return v if math.isfinite(v) else 0.0
 
 
-def learn_gateways(records, scope, state, threshold):
-    """A MAC address that fronts many non-local IP addresses is a router, not a device."""
-    seen = {m: set(v) for m, v in state.items()}
+def gateway_state(state):
+    """The stored evidence about routers: {"nets": {mac: [networks]}, "fwd": {mac: [addresses]}}.
+    Anything else in the file is ignored."""
+    out = {"nets": {}, "fwd": {}}
+    for kind in out:
+        part = state.get(kind) if isinstance(state, dict) else None
+        for mac, items in (part.items() if isinstance(part, dict) else ()):
+            if isinstance(mac, str) and re.fullmatch(r"[0-9a-f]{12}", mac) and isinstance(items, list):
+                out[kind][mac] = {x for x in items if isinstance(x, str)}
+    return out
+
+
+def learn_gateways(records, scope, state, threshold, neigh=None, fwd_threshold=2):
+    """Two signs that a MAC address belongs to a router, not to a device.
+
+    nets  it fronts addresses of many networks (/24, or /48 for IPv6) outside the site. Networks are counted,
+          not addresses: a device that changes its own address stays in one network.
+    fwd   it carries packets of local addresses that the neighbour protocol places at another MAC address,
+          so it forwards between local networks. An address that the MAC address itself once answered for
+          does not count (an address that moved from one device to another).
+    Returns (state to store, set of MAC addresses learned as routers).
+    """
+    seen = gateway_state(state)
+    nets, fwd = seen["nets"], seen["fwd"]
     for _, r in records:
+        ts = _float(r.get("ts"))
         for ip_f, mac_f in (("id.orig_h", "orig_l2_addr"), ("id.resp_h", "resp_l2_addr")):
             ip, mac = r.get(ip_f), r.get(mac_f)
             try:
-                if not ip or not mac or core.is_group_mac(mac) or scope.is_local_ip(ip) \
-                        or core._ip(ip).is_multicast:
+                if not ip or not mac or core.is_group_mac(mac):
                     continue
-                s = seen.setdefault(core.norm_mac(mac), set())
-                if len(s) <= threshold:
-                    s.add(ip)
+                a = core._ip(ip)
+                if a.is_multicast or a.is_unspecified or str(a) == "255.255.255.255":
+                    continue
+                m = core.norm_mac(mac)
+                if neigh is not None and neigh.at(ip, ts):
+                    owner = neigh.live_at(ip, ts)
+                    if owner and owner != m and not neigh.owned_by(str(a), m):
+                        f = fwd.setdefault(m, set())
+                        if len(f) <= fwd_threshold:
+                            f.add(str(a))
+                    continue                       # on the local link: not an address behind a router
+                if scope.is_local_ip(ip):
+                    continue
+                n = nets.setdefault(m, set())
+                if len(n) <= threshold:
+                    n.add(core._net_of(ip))
             except ValueError:
                 continue
-    return {m: sorted(v) for m, v in seen.items()}, {m for m, v in seen.items() if len(v) >= threshold}
+    learned = {m for m, v in nets.items() if len(v) >= threshold} | {m for m, v in fwd.items() if len(v) >= fwd_threshold}
+    return {k: {m: sorted(v) for m, v in part.items()} for k, part in seen.items()}, learned
+
+
+def load_neighbours(path, sightings):
+    """The neighbour table of the key stick, brought up to date with the sightings of this hour."""
+    neigh = core.Neighbours(_json_state(path, {}))
+    n = 0
+    for r in sorted((r for r in sightings if isinstance(r, dict)), key=lambda r: _float(r.get("ts"))):
+        n += neigh.see(r.get("ts"), r.get("ip"), r.get("mac"))
+    return neigh, n
 
 
 def build_ip2dom(dns_recs, ssl_recs, cache, now, scope=None, ttl=86400, cap=200000):
@@ -313,7 +550,7 @@ def build_ip2dom(dns_recs, ssl_recs, cache, now, scope=None, ttl=86400, cap=2000
             ip = str(ipaddress.ip_address(ip))
         except ValueError:
             return
-        if isinstance(name, str) and name and not (scope and scope.is_local_ip(ip)):
+        if isinstance(name, str) and 0 < len(name) <= 253 and not (scope and scope.is_local_ip(ip)):
             cache[ip] = [name, now]
     for r in dns_recs:
         answers = r.get("answers")
@@ -331,25 +568,43 @@ def build_ip2dom(dns_recs, ssl_recs, cache, now, scope=None, ttl=86400, cap=2000
     return live
 
 
-def _read_device_rows(path):
+def _read_device_rows(path, problems=None):
+    """The rows of a device table. A row that does not fit the header keeps its addresses and loses its labels.
+    A file that is not a table (a workbook saved under this name) ends the reading, it does not end the run."""
     if not os.path.exists(path):
         return []
-    with open(path, encoding="utf-8-sig", errors="replace", newline="") as f:
-        sample = f.read(2048)
-        f.seek(0)
-        delim = ";" if sample.count(";") > sample.count(",") else ","      # Excel in Turkish locale
-        return [{(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
-                for row in csv.DictReader(f, delimiter=delim)]
+    rows = []
+    try:
+        with open(path, encoding="utf-8-sig", errors="replace", newline="") as f:
+            sample = f.read(2048)
+            f.seek(0)
+            delim = ";" if sample.count(";") > sample.count(",") else ","      # Excel in Turkish locale
+            try:
+                for n, row in enumerate(csv.DictReader(f, delimiter=delim), 2):
+                    clean = {k.strip().lower(): v.strip() for k, v in row.items() if isinstance(k, str) and isinstance(v, str)}
+                    if None in row:              # more cells than the header: which cell belongs where is unknown
+                        clean = {k: v for k, v in clean.items() if k in ("mac", "ip")}
+                        if problems is not None:
+                            problems.append(f"line {n}: more cells than the header, labels of this line ignored")
+                    rows.append(clean)
+            except csv.Error:
+                if problems is not None:
+                    problems.append("the device table cannot be read as a table, the rest of it is ignored")
+    except OSError:                          # a damaged stick, a folder under this name: the labels are lost, not the hour
+        if problems is not None:
+            problems.append("the device table cannot be opened or read, the rest of it is ignored")
+    return rows
 
 
 def load_devices(key_dir, pz):
     """IT officer's table. Returns {pseudonym: labels}. Unsafe label text is refused, not written."""
     out, problems = {}, []
-    for n, row in enumerate(_read_device_rows(os.path.join(key_dir, "devices.csv")), 2):
+    for n, row in enumerate(_read_device_rows(os.path.join(key_dir, "devices.csv"), problems), 2):
         labels = {}
         for c in DEVICE_COLUMNS[2:]:
             v = row.get(c, "")
-            if not LABEL_OK.fullmatch(v) or core.scan_text(v) or (c in VOCAB and v not in VOCAB[c]):
+            if not LABEL_OK.fullmatch(v) or core.scan_text(v) or ADDRESS_LIKE.search(v) \
+                    or (c in VOCAB and v not in VOCAB[c]) or (c == "switch" and not SWITCH_OK.fullmatch(v)):
                 problems.append(f"line {n}: column {c} refused")
                 v = ""
             labels[c] = v
@@ -365,7 +620,10 @@ def load_devices(key_dir, pz):
     return out, problems
 
 
-def update_observed(key_dir, records, scope, gateways):
+NOT_PRIVATE = "a network outside the private ranges can only be set in the configuration"
+
+
+def update_observed(key_dir, records, scope, gateways, neigh=None):
     """Keep a list of the devices seen so far on the key stick, for the IT officer to label.
 
     The list holds real MAC and IP addresses. It is written to the key stick only and stays on site.
@@ -386,7 +644,8 @@ def update_observed(key_dir, records, scope, gateways):
         for ip_f, mac_f in (("id.orig_h", "orig_l2_addr"), ("id.resp_h", "resp_l2_addr")):
             ip, mac = r.get(ip_f), r.get(mac_f)
             try:
-                if _device_mac(mac, gateways) and ip and scope.is_local_ip(ip):
+                if _device_mac(mac, gateways) and ip and (scope.is_local_ip(ip) or (
+                        neigh is not None and neigh.at(ip, _float(r.get("ts"))) == core.norm_mac(mac))):
                     s = seen.setdefault(core.norm_mac(mac), set())
                     if len(s) < 4:
                         s.add(ip)
@@ -417,15 +676,19 @@ def _write_atomic(path, data: bytes):
 
 def _json_state(path, default):
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:      # Windows editors put a byte order mark in front
             return json.load(f)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):        # RecursionError: brackets nested thousands deep
         return default
 
 
-def _services(cfg, action):
+def _services(cfg, action, units=None):
     if cfg.get("manage_services"):
-        for unit in [f"ibe-zeek@{i}.service" for i in cfg["interfaces"]]:
+        if units is None:
+            units = [f"ibe-zeek@{i}.service" for i in cfg["interfaces"]]
+            if action == "stop":             # also a capture process that the configuration does not name
+                units.append("ibe-zeek@*.service")
+        for unit in units:
             try:
                 subprocess.run(["systemctl", action, unit], check=False)
             except OSError:
@@ -498,15 +761,17 @@ def sync_dirs(dirs):
     cov = {}
     for d in names:
         try:
-            with open(os.path.join(d, "coverage.jsonl"), encoding="ascii") as f:
+            with open(os.path.join(d, "coverage.jsonl"), encoding="ascii", errors="ignore") as f:
                 cov[d] = [x for x in f.read().splitlines() if x.strip()]
         except OSError:
             cov[d] = []
     def when(line):
         try:
-            return json.loads(line).get("t", 0), line
-        except (ValueError, AttributeError):
-            return 0, line
+            t = json.loads(line).get("t", 0)
+        except (ValueError, AttributeError, RecursionError):
+            t = 0
+        # a time that is not a number (a line edited by hand) must not stop the lines from being put in order
+        return (t if isinstance(t, (int, float)) and not isinstance(t, bool) and t == t else 0), line
     union = sorted({x for lines in cov.values() for x in lines}, key=when)
     for d, lines in cov.items():
         if lines != union:
@@ -546,12 +811,12 @@ def disk_swap_on(path="/proc/swaps", sysfs_block="/sys/block"):
         with open(path, encoding="ascii", errors="replace") as f:
             lines = f.read().splitlines()[1:]
     except OSError:
-        return False
+        return True                        # the list cannot be read: assume the worst
     for line in lines:
         if not line.split():
             continue
         dev = os.path.basename(line.split()[0])
-        if not dev.startswith("zram"):
+        if not line.split()[0].startswith("/dev/zram"):
             return True
         try:
             with open(os.path.join(sysfs_block, dev, "backing_dev"), encoding="ascii", errors="replace") as f:
@@ -571,8 +836,10 @@ def encrypt_exports(cfg, only=None):
     """
     key = cfg.get("export_recipient")
     src = cfg["data_dirs"][0]
-    if not key or not os.path.exists(key) or not os.path.isdir(src):
+    if not key or not os.path.isdir(src):
         return 0, None
+    if not os.path.exists(key):
+        return 0, "the export key file is missing, nothing is encrypted"
     dst = os.path.join(os.path.dirname(src.rstrip("/")), "export")
     home = os.path.join(cfg["raw_dir"], ".gnupg")
     os.makedirs(dst, exist_ok=True)
@@ -628,20 +895,33 @@ def run_once(cfg, now=None):
         st = {}
     for k, v in (("days", []), ("records_out", 0), ("records_dropped", {}), ("errors", []), ("files", 0)):
         st.setdefault(k, v)
+    st["days"] = known_days(cfg, st)
+    st["files"] = known_batches(cfg, st)
     last = st.get("last_run", 0)
     st.update(version=VERSION, site=cfg["site"], state="ok", warnings=[])
     # addresses of the site's own routers and networks are given on the key stick, so they stay on site
-    site = _json_state(os.path.join(cfg["key_dir"], "site.json"), {})
+    site = _json_state(os.path.join(cfg["key_dir"], "site.json"), None)
+    if not isinstance(site, dict) and os.path.exists(os.path.join(cfg["key_dir"], "site.json")):
+        st["warnings"].append("site.json on the key stick cannot be read and is ignored")
     for k in ("gateway_macs", "local_nets"):
         v = site.get(k) if isinstance(site, dict) else None
         if isinstance(v, list) and v and all(isinstance(x, str) for x in v):
             try:
                 [core.norm_mac(x) for x in v] if k == "gateway_macs" else core.Scope(v)
+                if k == "local_nets" and (core.nets_problem(v) or core.public_nets(v)):
+                    # A host in a local network is named by a token of its address. For addresses outside the
+                    # private ranges that needs the site's written permission, which the stick cannot give:
+                    # such a network can only be set in the configuration. (A public address that devices use
+                    # on the local link is recognised by itself, through the neighbour table.)
+                    raise ValueError(NOT_PRIVATE)
                 cfg = dict(cfg, **{k: v})
-            except ValueError:
-                st["warnings"].append(f"site.json: {k} ignored, bad value")
+            except ValueError as e:
+                st["warnings"].append(f"site.json: {k} ignored, " + (NOT_PRIVATE if str(e) == NOT_PRIVATE else "bad value"))
+    if not config_problem(cfg) and core.public_nets(cfg["local_nets"]):
+        st["warnings"].append(f"{core.public_nets(cfg['local_nets'])} of the local networks in the configuration are public "
+                              "address space: hosts in them are named by tokens")
 
-    if cfg.get("auto_init_key") and os.path.ismount(cfg["key_dir"]) \
+    if cfg.get("auto_init_key") and os.path.ismount(cfg["key_dir"]) and key_dir_ok(cfg) \
             and not os.path.exists(os.path.join(cfg["key_dir"], "hmac.key")):
         try:                               # an automount point without a stick behind it fails here
             init_key(cfg["key_dir"])
@@ -651,17 +931,34 @@ def run_once(cfg, now=None):
         st["clock_jumps"] = st.get("clock_jumps", []) + [{"t": now, "back_s": last - now}]
         st["warnings"].append("the clock went backwards, check the clock battery")
     st["last_run"] = now
+    step = clock_step(st, now)
     why = "the configuration is wrong: " + problem if problem else preflight(cfg, now)
     if why == "not armed":
         _services(cfg, "stop")
         purge_raw(cfg, everything=True)
         st["state"] = "ready, not recording (not armed)"
+        if os.path.exists(os.path.join(cfg["key_dir"], "armed.json")):
+            st["warnings"].append("armed.json is on the key stick but holds no usable approval reference")
         return _finish(cfg, st, status_path)
     if why:
         _stop(cfg, st, why)
         return _finish(cfg, st, status_path)
 
-    files = completed(cfg)
+    stray = stray_dirs(cfg)
+    if stray:          # a capture process the configuration does not name: nobody would read or delete its logs
+        _services(cfg, "stop", [f"ibe-zeek@{i}.service" for i in stray])
+        for i in stray:
+            for p in _zeek_files(cfg, i):
+                _remove(p)
+        st["warnings"].append("a capture directory that is not in the configuration was stopped and emptied")
+    # Zeek rotates its logs when its own clock reaches the next full hour, and that clock never goes back.
+    # After a step back it would hold its logs open, and raw data in RAM, until the system clock has caught
+    # up. So capture is stopped here (a stopped Zeek has written everything out) and started again below.
+    restart = step < -60 and bool(cfg.get("manage_services"))
+    if restart:
+        _services(cfg, "stop")
+        st["warnings"].append("the clock was set back: capture was restarted so that its logs are completed again")
+    files = completed(cfg, stopped=restart)
     n_written, quality = 0, {}
     try:
         n_written, quality = _process(cfg, st, now, files)
@@ -678,6 +975,10 @@ def run_once(cfg, now=None):
     finally:
         # raw logs are deleted whether or not the batch was written: nothing raw may outlive its run
         purge_raw(cfg, only=files)
+        if restart:                        # Zeek's notes about the open logs that were just read and deleted
+            for i in cfg["interfaces"]:
+                for p in glob.glob(os.path.join(cfg["raw_dir"], i, ".shadow.*")):
+                    _remove(p)
 
     links, warn = link_health(cfg, st.get("links"))
     st["links"] = links
@@ -700,13 +1001,22 @@ def run_once(cfg, now=None):
             st["warnings"].append("a data directory is not writable")
     try:
         sync_dirs(cfg["data_dirs"])
-    except OSError:
-        pass
+    except (OSError, ValueError):          # a damaged file on the data disk must not fail the run
+        st["warnings"].append("the data directories could not be compared")
     st["recording_days"] = len(st["days"])
     tz = ZoneInfo(cfg["timezone"])
     today = datetime.datetime.fromtimestamp(now, tz).date().isoformat()
-    if st["state"] == "ok" and st["recording_days"] >= cfg["max_recording_days"] and today not in st["days"]:
+    # Three limits. The number of days on which records were written. The number of hourly batches written,
+    # which a clock that stands still or is set back cannot stretch. And the calendar: days without recording
+    # move the end, but never further than max_calendar_days after the first day.
+    over_days = st["recording_days"] >= cfg["max_recording_days"] and today != max(st["days"])
+    over_hours = st["files"] >= cfg["max_recording_days"] * 25
+    over_span = bool(st["days"]) and today > last_day_allowed(st["days"], cfg["max_calendar_days"])
+    if st["state"] == "ok" and (over_days or over_hours):
         _stop(cfg, st, f"limit of {cfg['max_recording_days']} recording days reached", permanent=True)
+    elif st["state"] == "ok" and over_span:
+        _stop(cfg, st, f"limit of {cfg['max_calendar_days']} days since the first recording day reached",
+              permanent=True)
     elif st["state"] == "ok":
         _services(cfg, "start")          # no effect when already running, restarts capture after a pause
     st["errors"] = st["errors"][-50:]
@@ -727,17 +1037,20 @@ def _process(cfg, st, now, files):
     here = os.path.dirname(os.path.abspath(__file__))
     psl = core.PublicSuffix(os.path.join(here, "public_suffix_list.dat"))
     def rule_lines(path):
-        if not os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                return f.read().splitlines()
+        except OSError:                    # missing, or not readable: no rules from this file
             return []
-        with open(path, encoding="utf-8", errors="replace") as f:
-            return f.read().splitlines()
     builtin = rule_lines(os.path.join(here, "service_rules.csv"))
+    cat = core.Categoriser(builtin)
     try:
-        cat = core.Categoriser(builtin + rule_lines(os.path.join(cfg["key_dir"], "service_rules.csv")))
+        # a category is a word that leaves the site: the stick may assign domains to the built-in words only
+        cat.rules.update(core.Categoriser(rule_lines(os.path.join(cfg["key_dir"], "service_rules.csv"))).rules)
     except ValueError:
-        st["warnings"].append("service_rules.csv on the key stick ignored: a line has a bad category")
-        cat = core.Categoriser(builtin)
-    raw, max_days = cfg["raw_dir"], cfg["max_recording_days"]
+        st["warnings"].append("service_rules.csv on the key stick ignored: a line has a category "
+                              "that is not one of the built-in ones")
+    raw, max_days, max_span = cfg["raw_dir"], cfg["max_recording_days"], cfg["max_calendar_days"]
     tz = ZoneInfo(cfg["timezone"])
 
     dropped = st["records_dropped"]
@@ -753,36 +1066,51 @@ def _process(cfg, st, now, files):
                     r["_open"] = True
                 conn.append((n, r))
     quality = capture_quality(files, cfg["interfaces"])
-    if not conn:
-        return 0, quality
     n_written = 0
     cache_path = os.path.join(raw, "ip2dom.json")            # RAM only
+    cache = _json_state(cache_path, {})
     ip2dom = build_ip2dom((r for _, p in of_kind(files, "dns") for r in read_log(p)),
                           (r for _, p in of_kind(files, "ssl") for r in read_log(p)),
-                          _json_state(cache_path, {}), now, scope)
-    _write_atomic(cache_path, json.dumps(ip2dom).encode())
+                          cache if isinstance(cache, dict) else {}, now, scope)
+    _write_atomic(cache_path, json.dumps(ip2dom).encode())   # also in an hour without connections: names expire
+    neigh_path = os.path.join(cfg["key_dir"], "neighbours.json")    # holds real addresses, stays on site
+    neigh, n_seen = load_neighbours(neigh_path, (r for _, p in of_kind(files, "neigh") for r in read_log(p)))
+    st["neighbours"] = len(neigh.table)
+    odd = sum(1 for ip in neigh.table if not scope.is_local_ip(ip))
+    if odd:
+        # Such a site has networks of its own that the list does not know. A host of the site in another of
+        # them, behind a router, is written as a remote host ('wan') and cannot be told apart later.
+        st["warnings"].append(f"{odd} addresses on the local link are outside the local networks: if the site has more "
+                              "networks of that kind, they must be listed in the configuration (local_nets), or its "
+                              "hosts behind a router are recorded as remote hosts")
+    if n_seen:
+        try:
+            _write_atomic(neigh_path, json.dumps(neigh.dump(now)).encode())
+        except OSError as e:
+            st["errors"].append({"t": now, "e": f"cannot write to key stick: {e.strerror}"})
+    if not conn:
+        return 0, quality
     names = {k: v[0] for k, v in ip2dom.items()}
     gw_path = os.path.join(cfg["key_dir"], "gateways_seen.json")   # holds real addresses, stays on site
-    gw_state = _json_state(gw_path, {})
-    if not (isinstance(gw_state, dict) and all(isinstance(v, list) for v in gw_state.values())):
-        gw_state = {}
-    gw_state, learned = learn_gateways(conn, scope, gw_state, cfg["gateway_learn_threshold"])
+    gw_state, learned = learn_gateways(conn, scope, _json_state(gw_path, {}), cfg["gateway_learn_threshold"],
+                                       neigh, cfg["gateway_forward_threshold"])
     gateways = learned | {core.norm_mac(m) for m in cfg["gateway_macs"]}
     conn, n_dup = dedup(conn, cfg["dedup_window_s"], gateways)
     dropped["duplicate"] = dropped.get("duplicate", 0) + n_dup
 
     labels, problems = load_devices(cfg["key_dir"], pz)
+    categories = set(cat.rules.values()) | set(core.PORT_CATEGORY.values()) | {"other", "unknown"}
     unclassified, lines, days, devs, n_open = {}, [], set(st["days"]), set(), 0
     for iface, r in conn:
         rec, why = core.transform(r, pz, scope, gateways, cfg["wan_tokens"], names, psl, cat, iface,
-                                  bool(r.get("_open")))
+                                  bool(r.get("_open")), neigh)
         if rec is not None and not MIN_EPOCH <= rec["ts"] <= now + 86400:
             rec, why = None, "bad_time"            # stamped by a clock that was not set
-        if rec is not None and core.leak_check(rec):
+        if rec is not None and core.leak_check(rec, categories):
             rec, why = None, "leak_check"
         if rec is not None:
             day = datetime.datetime.fromtimestamp(rec["ts"], tz).date().isoformat()
-            if day not in days and len(days) >= max_days:
+            if day not in days and (len(days) >= max_days or (days and day > last_day_allowed(days, max_span))):
                 rec, why = None, "over_limit"
             else:
                 days.add(day)
@@ -797,7 +1125,10 @@ def _process(cfg, st, now, files):
                 reg = psl.registrable(names.get(r["id.resp_h"] if rec["rs"] == "wan" else r["id.orig_h"]))
                 if reg:
                     unclassified[reg] = unclassified.get(reg, 0) + 1
-        devs.update(x for x in (rec["o"], rec["r"]) if x[0] in "di" and len(x) == 11)
+        # a device counts as seen once it has sent a packet. An address that was only tried (a sweep through
+        # the router) would otherwise stay in this list, and in every copy of the status, for good.
+        devs.update(x for x, sent in ((rec["o"], rec["opk"] > 0), (rec["r"], rec["rpk"] > 0))
+                    if sent and x[0] in "di" and len(x) == 11)
     text = "\n".join(lines) + "\n"
     problem = core.scan_text(text)
     if problem:
@@ -806,6 +1137,13 @@ def _process(cfg, st, now, files):
     elif lines:
         blob = gzip.compress(text.encode(), 6, mtime=0)
         name = f"anon-{cfg['site']}-{now}-{hashlib.sha256(blob).hexdigest()[:8]}.jsonl.gz"
+        # The batch is counted before it is written. A run that dies after writing it (power cut, time limit,
+        # an error further down) would otherwise leave a batch and a day that no limit knows of.
+        try:
+            _write_atomic(os.path.join(cfg["state_dir"], "status.json"),
+                          json.dumps(dict(st, files=st["files"] + 1, days=sorted(days)), indent=1, sort_keys=True).encode())
+        except OSError:
+            pass                           # _finish stops capture if the state cannot be written
         written = 0
         for n, d in enumerate(cfg["data_dirs"]):
             try:
@@ -825,7 +1163,7 @@ def _process(cfg, st, now, files):
     # files for the IT officer. They hold real addresses and names and stay on the key stick.
     try:
         _write_atomic(gw_path, json.dumps(gw_state).encode())
-        update_observed(cfg["key_dir"], conn, scope, gateways)
+        update_observed(cfg["key_dir"], conn, scope, gateways, neigh)
         if unclassified:
             up = os.path.join(cfg["key_dir"], "unclassified_domains.json")
             old = _json_state(up, {})
@@ -836,6 +1174,9 @@ def _process(cfg, st, now, files):
     except OSError as e:
         st["errors"].append({"t": now, "e": f"cannot write to key stick: {e.strerror}"})
     seen = sorted(set(st.get("devices_seen", [])) | devs)
+    if len(seen) > MAX_DEVICES_SEEN:           # a flood of made-up senders: the count is kept, the list is not
+        st["warnings"].append("more devices than the status can list, the list is cut")
+        seen = seen[:MAX_DEVICES_SEEN]
     st.update(devices_seen=seen, devices_labelled=len([d for d in seen if d in labels]),
               devices_in_table=len(labels), device_table_problems=problems[:20],
               gateways=sorted(pz.device(m) for m in gateways))
@@ -863,12 +1204,20 @@ def _finish(cfg, st, status_path):
             st.setdefault("warnings", []).append("export encryption failed: " + err)
     except OSError as e:
         st.setdefault("warnings", []).append(f"export encryption failed: {e.strerror}")
+    try:
+        # the device's own state (day count, counters) stays on the device and is always written in full
+        _write_atomic(status_path, json.dumps(st, indent=1, sort_keys=True).encode())
+    except OSError:
+        # the day count cannot be saved, so the limit could not be kept: no recording until it can
+        st["state"] = "stopped: the state directory cannot be written"
+        _services(cfg, "stop")
+        purge_raw(cfg, everything=True)
     blob = json.dumps(st, indent=1, sort_keys=True).encode()
-    if core.scan_text(blob.decode()):          # the status file leaves the site too
+    if core.scan_text(blob.decode()):          # the copies of the status leave the site
         blob = json.dumps({"version": VERSION, "state": "status withheld by leak scan",
-                           "last_run": st.get("last_run")}).encode()
-    targets = [status_path] + [os.path.join(d, "status.json") for d in cfg["data_dirs"]]
-    if os.path.exists(os.path.join(cfg["key_dir"], "hmac.key")):       # the stick is plugged in
+                           "last_run": st.get("last_run"), "days": st.get("days")}).encode()
+    targets = [os.path.join(d, "status.json") for d in cfg["data_dirs"]]
+    if key_dir_ok(cfg) and os.path.exists(os.path.join(cfg["key_dir"], "hmac.key")):       # the stick is plugged in
         targets.append(os.path.join(cfg["key_dir"], "status.json"))
     for p in targets:
         try:
@@ -879,5 +1228,6 @@ def _finish(cfg, st, status_path):
         encrypt_exports(cfg, only=("status.json",))        # the copy in 'export' shows the status just written
     except OSError:
         pass
-    set_led(cfg, st["state"])
+    failed = any(w.startswith("the last run failed") for w in st.get("warnings", []))
+    set_led(cfg, "failed" if failed and st["state"] == "ok" else st["state"])
     return st

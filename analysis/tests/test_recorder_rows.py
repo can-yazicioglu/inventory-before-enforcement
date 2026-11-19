@@ -40,7 +40,7 @@ class RowTests(unittest.TestCase):
             with open(os.path.join(src, "coverage.jsonl"), "w") as f:
                 f.write('{"t": 1, "q": {}, "key": "aaaa1111"}\n{"t": 2, "q": {}, "key": "aaaa1111"}\n')
             norm = os.path.join(t, "norm.parquet")
-            summary = ar.convert(src, norm, dataset="t", tz="Europe/Istanbul")
+            summary = ar.convert(src, norm, dataset="t", tz="Europe/Istanbul", hours="none")
             env = dict(os.environ, GT_INPUTS=f"{norm}|Europe/Istanbul")
             env.pop("GT_ROLE", None)
             if role:
@@ -118,11 +118,90 @@ class RowTests(unittest.TestCase):
             (A, "29", f"6/out/1883@dev:{B}"), (B, "29", f"6/in/1883@dev:{A}"),
             (A, "30", f"6/out/1883@dev:{B}"), (B, "30", f"6/in/1883@dev:{A}"),
             (A, "31", f"6/out/1883@dev:{B}"),                                         # B silent that day
-            (A, "01", f"6/out/1883@dev:{B}"), (B, "01", f"6/in/1883@dev:{A}"),
+            (B, "01", f"6/in/1883@dev:{A}"),                                          # A silent that day (switched off)
         })
         self.assertEqual(volume[(A, "29", f"6/out/1883@dev:{B}")], 30)
         self.assertEqual(volume[(A, "30", f"6/out/1883@dev:{B}")], 0)                  # bytes come with the final record
-        self.assertEqual(summary["open_rows"], 6)                           # three reports, two sides each
+        self.assertEqual(summary["open_rows"], 5)             # three reports, two sides each, less the silent opener
+
+    def test_udp_turned_around_by_zeek(self):
+        """The first packet came from a server port: an answer whose question went to a group address
+        (LLMNR, mDNS) or was not captured. The asker sent nothing in this flow and gets no flow type."""
+        types, _, rows, _ = self.run_chain([rec(A, B, 50000 + i, 5355, ts=T0 + i, proto="udp", hist="Dd") for i in range(3)] + [
+            rec(C, B, 50010, 5355, ts=T0 + 50, proto="udp", hist="^d", ob=0, rb=40, opk=0, rpk=1),       # only B sent
+            rec(C, B, 50011, 5355, ts=T0 + 60, proto="udp", hist="^dD", ob=20, rb=40, opk=1, rpk=1),     # C sent later
+            rec(C, "mcast:llmnr", 50010, 5355, ts=T0 + 49, proto="udp", hist="D", est=False, rs="mcast"),
+        ])
+        self.assertEqual(types, {
+            (A, "29", f"17/out/5355@dev:{B}"), (B, "29", f"17/in/5355@dev:{A}"),
+            (B, "29", f"17/in/5355@dev:{C}"),                       # B answered C
+            (C, "29", f"17/out/5355@dev:{B}"),                      # from the flow in which C did send
+            (C, "29", "17/out/5355@mcast:llmnr"),
+        })
+        self.assertEqual(sum(1 for r in rows if r[0] == C and r[5]), 1)          # C has one row from a turned record
+
+    def test_protocols_without_ports(self):
+        icmp = dict(proto="icmp", ipp=1, hist="")
+        types, _, _, _ = self.run_chain([
+            rec(A, B, 8, 0, ts=T0, est=True, **icmp),                 # ping answered
+            rec(A, C, 8, 0, ts=T0 + 1, est=False, rb=0, **icmp),      # ping not answered
+            rec(C, A, 3, 3, ts=T0 + 2, est=False, rb=0, **icmp),      # an error message, nothing comes back
+            rec(A, B, 8, 0, ts=T0 + DAY, open=True, opk=0, rpk=3, est=True, ob=0, rb=30, **icmp),   # only B still sends
+        ])
+        self.assertEqual(types, {
+            (A, "29", f"1@dev:{B}"), (B, "29", f"1@dev:{A}"),
+            (A, "29", f"1@dev:{C}"),                                 # C got a ping and did not answer it
+            (B, "30", f"1@dev:{A}"),                                 # C's error message gives nobody a flow type
+        })
+
+    def test_finished_record_of_a_long_connection_speaks_for_its_opener_only(self):
+        """A finished record is stamped with its start, and its 'est' and its history cover its whole life.
+        If it ends in a later clock hour, who sent on which day is taken from the hourly reports. Here the
+        other side is switched off on the 29th and sends from the 30th on."""
+        long, report = dict(dur=30 * 3600.0), dict(open=True)        # 13:00 on the 29th to 19:00 on the 30th
+        silent_r, silent_o = dict(rpk=0, rb=0, est=False), dict(opk=0, ob=0)
+        icmp = dict(proto="icmp", ipp=1, hist="")
+        types, _, _, _ = self.run_chain([
+            # a datagram every minute from A to B
+            rec(A, B, 40001, 7000, ts=T0, proto="udp", hist="Dd", **long),
+            rec(A, B, 40001, 7000, ts=T0 + 3599, proto="udp", hist="D", **silent_r, **report),
+            rec(A, B, 40001, 7000, ts=T0 + DAY, proto="udp", hist="Dd", **report),
+            # a ping from A to C
+            rec(A, C, 8, 0, ts=T0, **icmp, **long),
+            rec(A, C, 8, 0, ts=T0 + 3599, **icmp, **silent_r, **report),
+            rec(A, C, 8, 0, ts=T0 + DAY, **icmp, **report),
+            # a record that Zeek turned around: B sends from port 443, its originator C is the silent one
+            rec(C, B, 40002, 443, ts=T0, proto="udp", hist="^dD", **long),
+            rec(C, B, 40002, 443, ts=T0 + 3599, proto="udp", hist="^d", **silent_o, **report),
+            rec(C, B, 40002, 443, ts=T0 + DAY, proto="udp", hist="^dD", **report),
+            # a TCP connection picked up without its handshake, the same
+            rec(C, B, 40003, 8081, ts=T0, hist="dDaA", **long),
+            rec(C, B, 40003, 8081, ts=T0 + 3599, hist="d", **silent_o, **report),
+            rec(C, B, 40003, 8081, ts=T0 + DAY, hist="dDaA", **report),
+            # a flow that lies within one clock hour has no report: its record counts for both sides
+            rec(A, B, 40004, 9000, ts=T0 + 10, proto="udp", hist="Dd", dur=3000.0),
+            # the last second of the hour belongs to it: no report is written for such a record
+            rec(A, B, 40005, 9001, ts=T0 + 10, proto="udp", hist="Dd", dur=3590.0),
+        ])
+        self.assertEqual(types, {
+            (A, "29", f"17/out/7000@dev:{B}"), (A, "30", f"17/out/7000@dev:{B}"), (B, "30", f"17/in/7000@dev:{A}"),
+            (A, "29", f"1@dev:{C}"), (A, "30", f"1@dev:{C}"), (C, "30", f"1@dev:{A}"),
+            (B, "29", f"17/in/443@dev:{C}"), (B, "30", f"17/in/443@dev:{C}"), (C, "30", f"17/out/443@dev:{B}"),
+            (B, "29", f"6/in/8081@dev:{C}"), (B, "30", f"6/in/8081@dev:{C}"), (C, "30", f"6/out/8081@dev:{B}"),
+            (A, "29", f"17/out/9000@dev:{B}"), (B, "29", f"17/in/9000@dev:{A}"),
+            (A, "29", f"17/out/9001@dev:{B}"), (B, "29", f"17/in/9001@dev:{A}"),
+        })
+
+    def test_outage_rule_must_be_chosen(self):
+        import contextlib
+        import io
+        argv = sys.argv
+        sys.argv = ["adapt_recorder.py", "in", "out.parquet"]                 # no --hours
+        try:
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                ar.main()
+        finally:
+            sys.argv = argv
 
     def test_open_report_without_handshake(self):
         types, _, rows, _ = self.run_chain([rec(A, B, 50000 + i, 1883, ts=T0 + i) for i in range(3)] + [

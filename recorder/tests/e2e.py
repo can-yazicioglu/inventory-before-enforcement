@@ -13,7 +13,7 @@ days are identical, the answers are known in advance:
   2. every raw record is either written or counted as dropped, and the raw logs are gone
   3. device pseudonyms match the MAC addresses one to one
   4. two capture ports give exactly the records of one capture port
-  5. the flow types computed by the analysis equal an independent computation in plain Python,
+  5. the flow types computed by the analysis equal a second implementation of the same rules in plain Python,
      including the records whose handshake was not seen and the reports about open connections
   6. no new flow type appears after the first day, so GT-C stops at T = 10 for epsilon 0.3 and
      at T = 7 for epsilon 1.0 on every device, with no alert day afterwards
@@ -54,7 +54,7 @@ def run_zeek(zeek, pcap, where):
     logs = {s: [r for p in sorted(glob.glob(os.path.join(where, s + "*.log"))) for r in pipeline.read_log(p)]
             for s in STEMS}
     extra = sorted({os.path.basename(p).split(".")[0] for p in glob.glob(os.path.join(where, "*.log"))} - set(STEMS))
-    check("Zeek writes only the six expected logs", not extra, f"extra: {extra}")
+    check("Zeek writes only the seven expected logs", not extra, f"extra: {extra}")
     return logs
 
 
@@ -66,6 +66,8 @@ def secrets_of(logs):
     for r in logs["dns"]:
         out.update(x for x in [r.get("query")] + list(r.get("answers") or []) if x and len(x) > 3)
     out.update(r["server_name"] for r in logs["ssl"] if r.get("server_name"))
+    for r in logs["neigh"]:
+        out.update((str(r["ip"]), str(r["mac"])))
     out |= {m.replace(":", "") for m in out if len(m) == 17 and m.count(":") == 5}
     return {s for s in out if len(s) >= 6}
 
@@ -83,8 +85,10 @@ def record_side(work, logs, days, ifaces, shift0, tokens):
     cfg = dict(pipeline.DEFAULTS, raw_dir=f"{work}/raw", data_dirs=[f"{work}/ssd", f"{work}/sd"],
                key_dir=f"{work}/key", state_dir=f"{work}/state", manage_services=False, interfaces=ifaces,
                sysfs_net=f"{work}/nosys", proc_swaps=f"{work}/noswaps", wan_tokens=tokens, max_recording_days=days,
-               raise_errors=True, require_ram_disk=False)
+               raise_errors=True, require_ram_disk=False, require_key_mount=False, rtc_epoch="")
     os.makedirs(cfg["key_dir"])
+    with open(cfg["proc_swaps"], "w") as f:
+        f.write("Filename Type Size Used Priority\n")
     pipeline.init_key(cfg["key_dir"])
     with open(os.path.join(cfg["key_dir"], "armed.json"), "w") as f:
         json.dump({"approval_ref": "end-to-end test"}, f)
@@ -112,18 +116,30 @@ def reference_types(recs, gateways):
 
     The rules, in plain words. The side that opened a connection has role 'out', the other side 'in',
     and the service port is the port of the 'in' side. A TCP record without the opening SYN and without
-    the answering SYN-ACK was picked up in the middle: it counts only for a side that sent something
-    other than a reset, and its roles come from the ports (the port that pairs with more counterpart
-    ports over the device's whole trace is the service, then a port below 1024, then equal ports,
-    then the lower port). An 'in' type counts on a day only if the device answered on that day.
+    the answering SYN-ACK was picked up in the middle, and a UDP record that Zeek turned around began
+    with a packet from a server port: who opened these is unknown. Such a record counts only for a side
+    that sent a packet (TCP: other than a reset), and its roles come from the ports (the port that pairs
+    with more counterpart ports over the device's whole trace is the service, then a port below 1024,
+    then equal ports, then the lower port). An 'in' type counts on a day only if the device answered
+    on that day. A report about an open connection counts for a side only if that side sent a packet
+    in the reported hour. A finished record that ends in a later clock hour than it began counts for
+    its opener at the start, everything else about it is taken from its reports. A protocol without
+    ports has no roles: its record counts for the answering side only if that side sent a packet.
+    An ICMP error message gives its sender nothing.
     """
     zone = ZoneInfo(TZ)
     rows = []
     for r in recs:
         proto = r["ipp"] if r["ipp"] > 0 else {"tcp": 6, "udp": 17, "icmp": 1}.get(r["proto"], 255)
         day = datetime.datetime.fromtimestamp(r["ts"], zone).date().isoformat()
-        seen = r["proto"] != "tcp" or "S" in r["hist"] or "h" in r["hist"]
-        o_sent = r["opk"] > 0 if r.get("open") else any(c in r["hist"] for c in "ADFH")
+        if r["proto"] == "tcp":
+            seen = "S" in r["hist"] or "h" in r["hist"]
+        else:
+            seen = not (r["proto"] == "udp" and r["hist"].startswith("^"))
+        # a finished record that ends in a later clock hour than it began: the reports say who sent when
+        cross = not r.get("open") and (r["ts"] + r["dur"] - 0.001) // 3600 > r["ts"] // 3600
+        o_sent = r["opk"] > 0 if r.get("open") else any(c in r["hist"] for c in "ADFH") and not cross
+        r_sent = r["est"] and not cross
 
         def peer(name, scope):
             if scope == "lan":
@@ -131,8 +147,15 @@ def reference_types(recs, gateways):
             return "wan" if scope == "wan" else name
         for dev, dscope, other, oscope, dport, pport, opener, sent in (
                 (r["o"], r["os"], r["r"], r["rs"], r["op"], r["rp"], True, o_sent),
-                (r["r"], r["rs"], r["o"], r["os"], r["rp"], r["op"], False, r["est"])):
+                (r["r"], r["rs"], r["o"], r["os"], r["rp"], r["op"], False, r_sent)):
             if dscope != "lan" or dev in gateways or (not seen and not sent):
+                continue
+            if opener and r.get("open") and not sent:
+                continue
+            if not opener and r["proto"] not in ("tcp", "udp") and not sent:
+                continue
+            if opener and r["proto"] == "icmp" and ((r["ipp"] == 1 and r["op"] in (3, 4, 5, 11, 12))
+                                                    or (r["ipp"] == 58 and 1 <= r["op"] <= 4)):
                 continue
             host = (r.get("wh") or "wc_" + r["wc"]) if oscope == "wan" else peer(other, oscope)
             answered = sent if not opener or not seen else True
@@ -194,7 +217,7 @@ def analyse(work, cfg, days, hours):
     got = set(map(tuple, inc.values))
     gateways = set(json.load(open(os.path.join(cfg["data_dirs"][0], "status.json")))["gateways"])
     want = reference_types(outputs(cfg), gateways)
-    check("flow types of the analysis equal the independent computation", got == want,
+    check("flow types of the analysis equal the second implementation of the rules", got == want,
           f"{len(got)} device-day-types, only in analysis {len(got - want)}, only in reference {len(want - got)}")
     py(os.path.join(an, "run_series3.py"), os.path.join(out, "inc", "inc_day.parquet"), os.path.join(out, "res"))
     sys.path.insert(0, an)
@@ -254,16 +277,24 @@ def main():
 
     key = pipeline.load_key(one["key_dir"])
     pz, scope = core.Pseudonymiser(key), core.Scope()
-    gw = {m for m, v in json.load(open(os.path.join(one["key_dir"], "gateways_seen.json"))).items() if len(v) >= 16}
+    with open(os.path.join(one["key_dir"], "gateways_seen.json")) as f:
+        seen_gw = json.load(f)
+    gw = {m for m, v in seen_gw["nets"].items() if len(v) >= 16} | {m for m, v in seen_gw["fwd"].items() if len(v) >= 2}
+    # who answers for which address on the local link, in plain Python from the raw neighbour log
+    link = {}
+    for r in sorted(logs["neigh"], key=lambda r: r["ts"]):
+        link.setdefault(r["ip"], core.norm_mac(r["mac"]))
     macs = set()
     for r in logs["conn"] + logs["open_conn"]:
         omac, rmac = r.get("orig_l2_addr") or "", r.get("resp_l2_addr") or ""
-        so, sr = scope.of(r["id.orig_h"], omac, gw), scope.of(r["id.resp_h"], rmac, gw)
+        so, sr = (scope.of(ip, mac, on_link=ip in link) for ip, mac in ((r["id.orig_h"], omac), (r["id.resp_h"], rmac)))
         if so in ("mcast", "bcast") or (so == "wan" and sr != "lan"):
             continue                                   # the recorder drops these records
-        for side, mac in ((so, omac), (sr, rmac)):
+        for side, mac, ip in ((so, omac, r["id.orig_h"]), (sr, rmac, r["id.resp_h"])):
             if side == "lan" and mac and not core.is_group_mac(mac) and core.norm_mac(mac) not in gw:
                 macs.add(core.norm_mac(mac))
+            elif side == "lan" and ip in link:
+                macs.add(link[ip])                     # through a router, named by the MAC address on the link
     seen = {x for r in r1 for x in (r["o"], r["r"]) if x.startswith("d") and len(x) == 11}
     check("device pseudonyms match MAC addresses one to one", seen == {pz.device(m) for m in macs},
           f"{len(seen)} pseudonyms, {len(macs)} MAC addresses, gateways learned {len(gw)}")
@@ -289,13 +320,13 @@ def main():
           all("wh" not in r and "wn" not in r and "wd" not in r for r in r3) and any("wc" in r for r in r3),
           f"service types: {sorted({r['wc'] for r in r3 if 'wc' in r})}")
     stick = sorted(os.listdir(one["key_dir"]))
-    check("files with real addresses stay on the key stick", "devices_observed.csv" in stick and "gateways_seen.json" in stick,
-          str(stick))
+    check("files with real addresses stay on the key stick",
+          all(x in stick for x in ("devices_observed.csv", "gateways_seen.json", "neighbours.json")), str(stick))
 
     # The replayed day starts at 00:20. The outage rule (working hours 09:00 to 18:00 here) is applied only
     # if the capture is long enough to cover them, otherwise it would rightly drop every day.
-    hours = "1-7=09:00-18:00" if t1 - t0 >= 17.75 * 3600 else ""
-    print("outage rule: " + ("applied, working hours " + hours if hours else "not applied, the capture is shorter than a working day"))
+    hours = "1-7=09:00-18:00" if t1 - t0 >= 17.75 * 3600 else "none"
+    print("outage rule: " + ("applied, working hours " + hours if hours != "none" else "not applied, the capture is shorter than a working day"))
     n_dev = analyse(a.work, one, a.days, hours)
     print(f"ALL PASS  raw records per day {n_raw}, days {a.days}, devices per level {n_dev}")
 

@@ -41,6 +41,13 @@ def icmp_echo(reply=False, ident=1, seq=1, data=b"ping"):
     return struct.pack("!BBHHH", 0 if reply else 8, 0, 0, ident, seq) + data
 
 
+def arp(sender, target, reply=False):
+    """ARP: the request of 'sender' for the MAC address of 'target', or the reply of 'sender' to 'target'."""
+    return struct.pack("!HHBBH6s4s6s4s", 1, 0x0800, 6, 4, 2 if reply else 1, _mac(sender.mac),
+                       socket.inet_aton(sender.ip), _mac(target.mac) if reply else b"\0" * 6,
+                       socket.inet_aton(target.ip))
+
+
 def dns_name(name):
     return b"".join(bytes([len(x)]) + x.encode() for x in name.split(".")) + b"\0"
 
@@ -74,6 +81,11 @@ class Pcap:
         v6 = ":" in a.ip
         body = ip6(a.ip, b.ip, proto, l4) if v6 else ip4(a.ip, b.ip, proto, l4)
         self.add(t, eth(a.mac, to_mac or via or b.mac, body, 0x86dd if v6 else 0x0800, vlan))
+
+    def arp(self, t, a, b, vlan=None):
+        """a asks for the MAC address of b by broadcast and b answers, as before any first packet between them."""
+        self.add(t, eth(a.mac, "ff:ff:ff:ff:ff:ff", arp(a, b), 0x0806, vlan))
+        self.add(t + 0.0005, eth(b.mac, a.mac, arp(b, a, reply=True), 0x0806, vlan))
 
     def write(self, path):
         with open(path, "wb") as f:
@@ -123,6 +135,11 @@ class Tcp:
 
     def syn(self, t):
         self._c(t, "S")
+        return self
+
+    def server_probe(self, t):
+        """A keep-alive probe of the server that nobody answers (the client is switched off)."""
+        self._s(t, "A")
         return self
 
     def refused(self, t):

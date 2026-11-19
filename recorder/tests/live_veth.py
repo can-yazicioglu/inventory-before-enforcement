@@ -104,8 +104,10 @@ def main():
         raise SystemExit("/dev/shm is not a RAM disk on this machine")
     cfg = dict(pipeline.DEFAULTS, raw_dir=f"{ram}/raw", data_dirs=[f"{w}/ssd", f"{w}/sd"], key_dir=f"{w}/key",
                state_dir=f"{w}/state", manage_services=False, interfaces=[b for _, b in PAIRS], wan_tokens=True,
-               proc_swaps=f"{w}/noswaps", raise_errors=True)
+               proc_swaps=f"{w}/noswaps", raise_errors=True, require_key_mount=False, rtc_epoch="")
     os.makedirs(cfg["key_dir"])
+    with open(cfg["proc_swaps"], "w") as f:
+        f.write("Filename Type Size Used Priority\n")
     pipeline.init_key(cfg["key_dir"])
     with open(os.path.join(cfg["key_dir"], "armed.json"), "w") as f:
         json.dump({"approval_ref": "live test"}, f)
