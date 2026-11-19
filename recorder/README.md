@@ -101,8 +101,8 @@ CICIoMT2024 (1,935,680 packets, 22.1 hours, 25 source MAC addresses).
 | Check | Result |
 |---|---|
 | Zeek writes only the six expected logs | pass |
-| Every raw record written or counted, one capture port | 446,940 written, 0 dropped (per day 13,945 connection records and 953 hourly reports) |
-| Every raw record written or counted, two capture ports | 446,940 written, 446,940 duplicates removed |
+| Every raw record written or counted, one capture port | 446,970 written, 0 dropped (per day 13,945 connection records and 954 hourly reports) |
+| Every raw record written or counted, two capture ports | 446,970 written, 446,970 duplicates removed |
 | Two ports give exactly the records of one port | pass |
 | Raw logs deleted after every run | pass |
 | Device pseudonyms match MAC addresses one to one | 24 pseudonyms, 24 MAC addresses, 1 gateway learned |
@@ -114,9 +114,11 @@ CICIoMT2024 (1,935,680 packets, 22.1 hours, 25 source MAC addresses).
 | No alert day in the 14 days after enforcement | pass |
 
 The same test on a scan (the OS scan capture of CICIoMT2024, 38,364 packets in 218 seconds, 30,975
-connection records, 7,590 of them over the 30 days without a handshake): every check passes, 56,040
-device-day-types equal the independent computation. Of 1,015 ports probed on the scanned devices
-2 were answered, and only those became flow types of the scanned devices.
+connection records): every check passes, 56,040 device-day-types equal the independent computation.
+On the scanned devices 1,015 ports received connection attempts and 2 were answered. Those two
+became flow types of the scanned devices, the 1,013 others did not. The scanner itself has 1,828
+flow types, as it should. 253 rows a day come from records without a handshake, among them two MQTT
+sessions that were already running when the capture started and are counted correctly.
 
 `tests/live_veth.py` (two virtual capture ports, live Zeek, replay with tcpreplay):
 
@@ -124,9 +126,9 @@ device-day-types equal the independent computation. Of 1,015 ports probed on the
 |---|---|
 | Replay at 50 Mbit/s (33,234 packets per second) | 1,935,680 of 1,935,680 packets seen on each port, none dropped |
 | Replay at 200 Mbit/s (132,934 packets per second) | 1,935,680 of 1,935,680 packets seen on each port, none dropped |
-| Replay at about 770 Mbit/s (767 and 780 Mbit/s reached, over 510,000 packets per second) | 1,935,680 of 1,935,680 packets seen on each port, none dropped |
-| Rotation, anonymisation, duplicates across ports | 34,203 records written, 34,195 duplicates removed |
-| Connections that stay open are reported while they are open | 10,022 reports (every 10 seconds in this test) |
+| Replay at about 800 Mbit/s (779 and 829 Mbit/s reached, over 517,000 packets per second) | 1,935,680 of 1,935,680 packets seen on each port, none dropped |
+| Rotation, anonymisation, duplicates across ports | 34,205 records written, 34,212 duplicates removed |
+| Connections that stay open are reported while they are open | 10,021 reports (every 10 seconds in this test) |
 | Logs completed while the anonymiser was busy | kept and read by the next run |
 | Capture killed in the middle of a log | the open log was rotated at restart and anonymised on the next run |
 | Key removed | recording stopped, RAM emptied, capture not allowed to start again |
@@ -136,8 +138,8 @@ device-day-types equal the independent computation. Of 1,015 ports probed on the
 `tests/batch_size.py`: one run takes 0.39 GB of memory for 104,293 records, 1.86 GB for 521,465 and
 3.70 GB for 1,042,930, at about 12,000 records per second.
 
-Zeek itself: 84 MB for the benign capture. During a made-up port scan of 1.5 million unanswered
-connection attempts in 30 minutes it needs 289 MB (103 MB with Zeek's default settings), because
+Zeek itself: 85 MB for the benign capture. During a made-up port scan of 1.5 million unanswered
+connection attempts in 30 minutes it needs 290 MB (103 MB with Zeek's default settings), because
 every connection is looked at once more after five minutes.
 
 These runs show that the chain is correct. They do not show what a given board can sustain. Loss
