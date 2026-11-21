@@ -195,7 +195,7 @@ address, its network and its registrable domain. Records pass a field whitelist 
 address shapes before they are written. The recorder cannot transmit on its capture ports, starts
 only after an approval reference has been entered on site, does not record while any swap to disk
 is active, and stops by itself after the permitted number of recording days. Before use the recorder
-was reviewed in two rounds from the code alone, each time once for what can leave the site and once
+was reviewed in three rounds from the code alone, each time once for what can leave the site and once
 for what is measured. Every case these reviews found is now part of the tests.
 
 The chain from packets to the stopping rule was verified in two ways (`recorder/README.md`). A public

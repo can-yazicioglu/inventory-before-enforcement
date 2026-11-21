@@ -21,7 +21,7 @@ All of these produce numbers that go into the paper. Run them on the actual devi
 11. **No swap.** After the reboot `cat /proc/swaps` must list nothing. If it lists anything, `status.json` says "stopped: swap to disk is on" and nothing is recorded. Current Raspberry Pi OS sets up compressed swap with a file behind it, which the installer switches off.
 12. **Journal in RAM.** `journalctl --header | grep "File path"` must show files under `/run/log/journal` only.
 13. **Key stick absent.** Boot without the key stick: `status.json` must say "stopped: key stick missing". Plug it in: the key is created within the hour and the state becomes "ready, not recording".
-14. **Fail-safe.** While recording, make `/etc/ibe/config.json` unreadable (add a stray character) and wait for the next run. `status.json` must say "stopped: the configuration is wrong", capture must be stopped and `/run/ibe/raw` must hold no logs. Then run `sudo systemctl start ibe-failsafe.service` by hand and check the same. Restore the file.
+14. **Fail-safe.** While recording, make `/etc/ibe/config.json` unreadable (add a stray character) and wait for the next run. `status.json` must say "stopped: the configuration is wrong", capture must be stopped and `/run/ibe/raw` must hold no logs. Then run `sudo systemctl start ibe-failsafe.service` by hand and check the same, and that `status.json` now says "stopped: the hourly job failed or was ended" and the light blinks fast. Restore the file.
 15. **Long connection.** Keep one connection open through a mirrored port for three hours (for example an SSH session with a command that prints every minute). The anonymised records must contain reports with `"open":true` for it.
 16. **Chip variant.** `dmesg | grep -i r8169` must show both ports of the adapter with a chip name the driver knows (RTL8125A, B or D).
 17. **Neighbour table.** After an hour of recording on a network with a router, `status.json` must show `neighbours` above zero and `gateways` with one entry, and no record of a device on the mirrored network may carry `ib`. If a second network behind the router can be mirrored as well, a connection between the two networks must carry the device pseudonyms of both ends.
@@ -29,13 +29,15 @@ All of these produce numbers that go into the paper. Run them on the actual devi
 19. **Idle stick.** Leave the device recording for a day without touching the key stick or the data disk. Every hour must have its file: a stick that the system has put to rest must still count as present.
 20. **Clock set back.** While recording, set the clock back by two hours (`sudo timedatectl set-time`). After the next run `status.json` must say that the clock was set back and that capture was restarted, and `/run/ibe/raw` must hold only the open logs of the new capture. Set the clock right afterwards.
 21. **Tunnel.** If a device with a VPN or a tunnel is at hand (PPTP, GRE, IPv6 in IPv4), let it send through a mirrored port: its records must show `proto` `unknown_transport` with `ipp` 47, 41 or 4, and no device may appear that does not exist on the network.
+22. **Start after power comes back.** With two or three capture ports in use, pull the power and plug it in again five times. After each start all capture services must be running within three minutes (`systemctl is-active 'ibe-zeek@*'`), and `status.json` must say "ok" after the first hourly run.
+23. **Computer name as a label.** After a day of recording on a network with Windows computers, write the name of one of them into the `model` column of `devices.csv`. After the next run `devices.json` must hold an empty model for that row, `status.json` must list the line under `device_table_problems`, and `names_seen.json` on the key stick must hold the name.
 
 Ask the site, before shipping, whether any of its own networks uses addresses outside the private ranges
 (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, fc00::/7). If so, list all networks of the
 institution in `local_nets` of the configuration, and have the written permission cover it: hosts in a
 listed network are named by tokens of their addresses. Without the list a server of the institution in
 another routed network is recorded as a remote host and cannot be told from the internet afterwards.
-The key stick cannot add such a network later.
+The key stick cannot add a network later, it can only take networks away from the list.
 
 Ship the device with `max_recording_days` set to the number of days the site has permitted, `wan_tokens`
 set according to the site's written permission, and a key stick and a data disk that are empty. A stick
@@ -48,21 +50,21 @@ the key of that recording.
 2. On each managed switch, mirror incoming traffic of every port to a free port and connect that port to one capture port of the recorder (see `recorder/README.md`).
 3. Plug in the key stick (FAT32, label `IBE-KEY`) and the data disk (exFAT, label `IBE-DATA`).
 4. Wait for the written notice that ethics approval has been granted. Only then copy `armed.json` to the key stick.
-5. In the first week, label the devices: `devices_observed.csv` on the key stick lists what was seen. Fill in the columns and save as `devices.csv` on the stick. Do this outside working hours and put the stick back within a few minutes: if the stick is missing when the hourly job runs (seven minutes past the hour), that hour is not recorded.
-6. Before recording starts, write the MAC address of every router, firewall and layer 3 switch into `site.json` on the key stick: `{"gateway_macs": ["aa:bb:cc:dd:ee:ff"]}`. The recorder also recognises routers by itself, but only after it has seen enough of their traffic, and the records before that name the devices behind the router wrongly. After the first day, compare `gateways` in `status.json` with the number of routers you know, and read the warnings in the same file.
+5. In the first week, label the devices: `devices_observed.csv` on the key stick lists what was seen. Fill in the columns and save as `devices.csv` on the stick. Do this outside working hours, take the stick out between ten and fifty minutes past the hour and put it back within a few minutes. The stick must be in place at seven minutes past the hour, when the hourly job runs: if it is missing then, capture stops and about two hours are not recorded.
+6. Before recording starts, write the MAC address of every router, firewall and layer 3 switch into `site.json` on the key stick: `{"gateway_macs": ["aa:bb:cc:dd:ee:ff"]}`. The recorder also recognises routers by itself, but only after it has seen enough of their traffic, and the records before that name the hosts behind the router wrongly. After the first day, compare `gateways` in `status.json` with the number of routers you know, and read the warnings in the same file. If a router or firewall is replaced during the recording, add the MAC address of the new device to the list before it is connected, keep the old one in the list, and note the date.
 
 | Column | Values |
 |---|---|
 | `type` | `pc`, `server`, `vm`, `ip_phone`, `printer`, `camera`, `nvr`, `storage`, `medical_device`, `medical_pc`, `switch`, `firewall`, `access_point`, `other` |
-| `brand`, `model` | free text, at most 40 plain characters. No names of people or rooms, no host names, no addresses: a cell that looks like an address or a host name is dropped |
+| `brand`, `model` | free text, at most 40 plain characters. No names of people or rooms, no computer names, no addresses. A cell that looks like an address, or that holds a name by which computers of the site call each other on the network, is dropped and listed in `status.json`. A computer name that the network never showed is not recognised, so do not type one |
 | `group` | `agentless` (embedded devices and vendor-managed medical PCs), `general` (PCs, servers, virtual machines), `infrastructure` |
 | `visibility` | `full` (all of the device's traffic passes a mirrored port), `partial` (behind an unmanaged switch) |
 | `switch` | a letter or a code of up to three characters for the switch the device is connected to |
 
 7. Look at the status light once a week. If it blinks fast, read `status.json` on the key stick.
-8. To hand over data, read `devices.json` in the folder `anon` first: it holds the labels as they leave, and nothing in it should name a person, a room or a host. Then copy the folder `export` (encrypted) from the data disk outside working hours and send it. The recorder keeps a second copy and refills the disk afterwards.
+8. To hand over data, read `devices.json` in the folder `anon` first: it holds the labels as they leave, and nothing in it should name a person, a room or a computer. Then copy the folder `export` (encrypted) from the data disk outside working hours and send it. The recorder keeps a second copy and refills the disk afterwards.
 9. Do not replace the key stick by another one during the recording. A new stick gets a new key, and devices before and after can no longer be matched. `status.json` reports it if it happens.
-10. At the end, keep or destroy the key stick. It holds the key and the files with real addresses (`devices.csv`, `devices_observed.csv`, `gateways_seen.json`, `neighbours.json`). Without it the pseudonyms cannot be linked to devices by anyone.
+10. At the end, keep or destroy the key stick. It holds the key and the files with real addresses and names (`devices.csv`, `devices_observed.csv`, `gateways_seen.json`, `neighbours.json`, `names_seen.json`). Without it the pseudonyms cannot be linked to devices by anyone.
 
 ## What the researcher receives
 

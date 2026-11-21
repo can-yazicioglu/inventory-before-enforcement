@@ -54,8 +54,10 @@ python3 recorder/tests/e2e.py --pcap capture.pcap --work /tmp/ibe-e2e      # any
 gets wrong unless it is handled on purpose (a connection open for 50 hours, one that never closes,
 one picked up in the middle with the server speaking first, 20 minutes of silence, a slow answer,
 refusals, midnight, three devices asking for an address at once, a ping that runs for days, a device
-that is switched off, two VLANs joined by a router, tunnels) and checks that the chain gives exactly
-the flow types written down beforehand for every device and day.
+that is switched off, two VLANs joined by a router, tunnels, an answer that comes after the client
+has given up, a name server that never answers, two capture ports that see the same flow
+differently) and checks that the chain gives exactly the flow types written down beforehand for
+every device and day.
 
 `e2e.py` replays a real capture as 30 identical days through Zeek, the recorder, the adapter and
 the analysis, and checks answers that are known in advance: nothing identifying leaves the
@@ -69,7 +71,7 @@ The recorder is built so that the researchers never hold identifying data.
 - Raw logs exist only in RAM and are deleted every hour, whether or not the hour could be written. The recorder refuses to record if its log directory is not a RAM disk or if any swap could move memory to a disk.
 - Local devices are named by HMAC-SHA256 pseudonyms. The key is created on site, lives on a USB stick that stays there, and is never copied. Pulling the stick stops the recording.
 - Remote hosts are never named. They carry a coarse service type and, only where the site's written permission covers it, one-way tokens.
-- No packet contents, URLs, user names or host names are kept.
+- No packet contents, URLs or user names are kept. Names of hosts are read on site only, to derive a service type and to refuse the name of a computer that is typed where a brand or model belongs. They stay in RAM or on the key stick and are never written into a record.
 - Every record passes a field whitelist, and every output file passes a scan for anything shaped like an address.
 - Capture ports cannot transmit: a kernel rule drops every outgoing frame.
 - Recording starts only after the ethics approval reference has been entered on site, and stops by itself after the permitted number of days.
