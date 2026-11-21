@@ -110,7 +110,7 @@ def main():
         f.write("Filename Type Size Used Priority\n")
     pipeline.init_key(cfg["key_dir"])
     with open(os.path.join(cfg["key_dir"], "armed.json"), "w") as f:
-        json.dump({"approval_ref": "live test"}, f)
+        json.dump({"approval_ref": "live test 1"}, f)
     links()
     zeeks = {}
     try:

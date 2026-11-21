@@ -34,6 +34,13 @@ result must equal them exactly.
   held        an answer that is the first packet after midnight counts on the day it was sent
               (a second capture, silent around midnight)
   flood       connection attempts that never got going are kept for a day up to a limit only
+  late answer a device that answers a connection attempt after the client has given up took part
+  early answer    the capture shows the SYN-ACK of a server before the SYN it answers: the client opened
+              the connection and the server took part, also if it sent nothing else
+  turned      a datagram to a group that Zeek writes the other way round still belongs to its sender
+  dead dns    a name server address that never answers: the device that asks has the flow, nobody else
+  two views   two capture ports that see a flow in a different order around a full hour, and a port
+              that misses the first frame of an exchange, give the flow types of one port
 
 The same logs are then fed through two capture ports, and the capture is repeated with every frame
 doubled (a switch that mirrors both directions): the flow types must not change.
@@ -82,10 +89,14 @@ E1 = synth.Host("02:00:00:00:00:1a", "192.168.10.5")          # VLAN 10
 E2 = synth.Host("02:00:00:00:00:1b", "192.168.20.5")          # VLAN 20
 RX = "02:00:00:00:00:fd"                                      # routes between VLAN 10 and 20, leads nowhere else
 RX10, RX20 = synth.Host(RX, "192.168.10.1"), synth.Host(RX, "192.168.20.1")
+PA = synth.Host("02:00:00:00:00:21", "192.168.1.51")         # on switch 1 in the case of the two views
+PB = synth.Host("02:00:00:00:00:22", "192.168.1.52")         # on switch 0
 NAMES = {"C1": C1.mac, "S1": S1.mac, "D3": D3.mac, "D4": D4.mac, "D5": D5.mac, "D6": D6.mac, "D7": D7.mac, "M": M.mac,
-         "E1": E1.mac, "E2": E2.mac, "GW": GW, "RX": RX}
+         "E1": E1.mac, "E2": E2.mac, "GW": GW, "RX": RX, "PA": PA.mac, "PB": PB.mac}
+DEAD_DNS = "10.77.0.53"                                       # handed out by DHCP, in another network, answers nobody
+BY_ADDRESS = {"DNSX": DEAD_DNS}                               # hosts behind the router, named by a token of their address
 SECRETS = ("192.168.", "52.1.", "8.8.8.8", "02:00:00", "020000", "fe80", "teamviewer", "224.0.0", "239.255",
-           "192.88.", "52.9.", "10.99.", "2002:", "2a00:")
+           "192.88.", "52.9.", "10.99.", "2002:", "2a00:", "10.77.")
 
 
 def routed(p, frames, vlan_of):
@@ -330,6 +341,55 @@ def build(path, double=False):
     expect("D6", (29,), "47@wan")
     expect("D6", (29,), "17/out/4789@wan")
 
+    # late answer: D4 tries the printer D6 and gives up. D6 wakes up and answers eight seconds later, and again.
+    # Zeek has closed the attempt by then, so the answer is a record of its own that begins with a SYN-ACK
+    # (history letter H). D6 took part: it answered.
+    p.send(T0 + 4000, D4, D6, synth.tcp(50050, 9100, 1000, 0, "S"), 6)
+    for dt in (8, 11, 17):
+        p.send(T0 + 4000 + dt, D6, D4, synth.tcp(9100, 50050, 5000, 1001, "SA"), 6)
+    expect("D4", (29,), "6/out/9100@dev:D6")
+    expect("D6", (29,), "6/in/9100@dev:D4")
+
+    # early answer: the capture shows the SYN-ACK before the SYN (the first frame came late). Zeek turns the
+    # record round when it sees the SYN, and the letters it wrote before that keep their old direction
+    # (history Hs^...). D5 opened both connections. S1 goes on to answer, D6 sends its SYN-ACK and nothing else.
+    t = T0 + 4050
+    p.send(t, S1, D5, synth.tcp(8843, 50060, 5000, 1001, "SA"), 6)
+    p.send(t + 0.01, D5, S1, synth.tcp(50060, 8843, 1000, 0, "S"), 6)
+    p.send(t + 0.02, D5, S1, synth.tcp(50060, 8843, 1001, 5001, "A"), 6)
+    p.send(t + 0.03, D5, S1, synth.tcp(50060, 8843, 1001, 5001, "PA", b"hello"), 6)
+    p.send(t + 0.04, S1, D5, synth.tcp(8843, 50060, 5001, 1006, "PA", b"world"), 6)
+    p.send(t + 0.05, D5, S1, synth.tcp(50060, 8843, 1006, 5006, "FA"), 6)
+    p.send(t + 0.06, S1, D5, synth.tcp(8843, 50060, 5006, 1007, "FA"), 6)
+    p.send(t + 0.07, D5, S1, synth.tcp(50060, 8843, 1007, 5007, "A"), 6)
+    p.send(t + 5, D6, D5, synth.tcp(9102, 50061, 7000, 2001, "SA"), 6)
+    p.send(t + 5.01, D5, D6, synth.tcp(50061, 9102, 2000, 0, "S"), 6)
+    p.send(t + 5.02, D5, D6, synth.tcp(50061, 9102, 2001, 0, "R"), 6)
+    expect("D5", (29,), "6/out/8843@dev:S1")
+    expect("S1", (29,), "6/in/8843@dev:D5")
+    expect("D5", (29,), "6/out/9102@dev:D6")
+    expect("D6", (29,), "6/in/9102@dev:D5")
+
+    # turned: a datagram from one of Zeek's "likely server ports" (137) to a group. Zeek writes the group as
+    # the originator. The sender is D3.
+    group = synth.Host("01:00:5e:7f:ff:fa", "239.255.255.250")
+    p.send(T0 + 4100, D3, group, synth.udp(137, 1900, b"M-SEARCH"), 17, to_mac=group.mac)
+    expect("D3", (29,), "17/out/1900@mcast:ssdp")
+
+    # dead dns: the address of a name server that DHCP hands out, in another private network, answers nobody.
+    # D4 asks it through the router on both days and then asks a public resolver. D4 has the flow, towards a
+    # host that is named by a token of its address. A second dead address on the local link gets ARP questions
+    # only: no packet is ever sent to it, so there is no flow.
+    for day in (0, 1):
+        for k in range(3):
+            t = T0 + 4200 + day * 24 * H + k
+            p.send(t, D4, synth.Host(GW, DEAD_DNS), synth.udp(51000 + k, 53, synth.dns_query(k, "example.org")), 17, via=GW)
+            p.add(t + 0.5, synth.eth(D4.mac, "ff:ff:ff:ff:ff:ff", synth.arp(D4, synth.Host(GW, "192.168.1.53")), 0x0806))
+        p.send(t + 1, D4, synth.Host(GW, "8.8.8.8"), synth.udp(51009, 53, synth.dns_query(9, "example.org")), 17, via=GW)
+        p.send(t + 1.05, synth.Host(GW, "8.8.8.8"), D4, synth.udp(53, 51009, synth.dns_answer(9, "example.org", "52.1.0.9")), 17)
+    expect("D4", (29, 30), "17/out/53@ip:DNSX")
+    expect("D4", (29, 30), "17/out/53@wan")
+
     # one last packet, hours later. The logs that Zeek writes when it stops are read as well.
     p.send(END, D3, S1, synth.udp(40099, 9998, b"end"), 17)
     expect("D3", (31,), "17/out/9998@dev:S1")
@@ -381,7 +441,55 @@ def flood(zeek, work, limit=20):
     hours = run_zeek(zeek, os.path.join(work, "capture.pcap"), os.path.join(work, "zeek"), (f"IBE::max_one_sided={limit}",))
     ended = {hour: sum(1 for path in paths if os.path.basename(path).startswith("conn.") for _ in pipeline.read_log(path))
              for hour, paths in hours.items()}
-    return ended.get(T0, 0), ended.get(T0 + 2 * H, 0)
+    return ended.get(T0, 0), ended[max(ended)]         # the last group holds what Zeek wrote when it stopped
+
+
+def two_views(zeek, work):
+    """Two switches, each mirrored to its own capture port. PA hangs on switch 1, PB on switch 0. Each port
+    sees the frames of its own device first and those of the other device a moment later.
+
+    hour     PA asks PB two seconds before midnight, PB answers half a second before it. Just after midnight
+             PA asks again, PB answers, PA thanks. Each port writes a report about the hour before midnight
+             and, within two seconds of it, the last report of the flow. Both devices sent on both days.
+    missed   PA asks PB by SNMP and PB answers. The port of switch 0 does not get the question, so its record
+             begins with the answer. PB did not open a flow to PA.
+    Returns (flow types found, flow types expected, duplicates counted, records written)."""
+    delay = 0.0002
+    quiet = (synth.Host("02:00:00:00:00:31", "192.168.1.61"), synth.Host("02:00:00:00:00:32", "192.168.1.62"))
+    p = synth.Pcap()
+    p.arp(MIDNIGHT - 30, PA, PB)
+    for dt, a, b, sp, dp in ((-2.0, PA, PB, 40005, 9999), (-0.5, PB, PA, 9999, 40005), (0.5, PA, PB, 40005, 9999),
+                             (0.6, PB, PA, 9999, 40005), (0.7, PA, PB, 40005, 9999)):
+        p.send(MIDNIGHT + dt, a, b, synth.udp(sp, dp, b"data"), 17)
+    snmp = MIDNIGHT - 5 * H
+    p.send(snmp, PA, PB, synth.udp(50000, 161, b"get"), 17)
+    p.send(snmp + 0.004, PB, PA, synth.udp(161, 50000, b"value"), 17)
+    t = MIDNIGHT - 6 * H
+    while t < MIDNIGHT + 3 * H:                     # other devices keep the clock of both ports moving
+        p.arp(t + 0.1, *quiet)
+        t += 20
+    want = {("PA", d, "17/out/9999@dev:PB") for d in (29, 30)} | {("PB", d, "17/in/9999@dev:PA") for d in (29, 30)}
+    want |= {("PA", 29, "17/out/161@dev:PB"), ("PB", 29, "17/in/161@dev:PA")}
+    os.makedirs(work)
+    hours = []
+    for port, own in ((0, PB), (1, PA)):
+        view = synth.Pcap()
+        for t, fr in p.frames:
+            mine = fr[6:12] == synth._mac(own.mac) or fr[6:12] not in (synth._mac(PA.mac), synth._mac(PB.mac))
+            if not (port == 0 and t == snmp):       # the question that the port of switch 0 misses
+                view.add(t if mine else t + delay, fr)
+        view.write(os.path.join(work, f"port{port}.pcap"))
+        hours.append(run_zeek(zeek, os.path.join(work, f"port{port}.pcap"), os.path.join(work, f"zeek{port}")))
+    cfg, st, _ = record(work, hours, ["eth0", "eth1"])
+    got, _ = flow_types(work, cfg)
+    return got, want, st["records_dropped"].get("duplicate", 0), st["records_out"]
+
+
+def rotation_offset():
+    """Seconds past the full hour at which the Zeek script completes its logs."""
+    with open(os.path.join(REPO, "recorder", "zeek", "ibe.zeek"), encoding="utf-8") as f:
+        m = re.search(r'^redef log_rotate_base_time = "0:(\d\d)";', f.read(), re.M)
+    return 60 * int(m.group(1)) if m else 0
 
 
 def run_zeek(zeek, pcap, where, settings=()):
@@ -390,12 +498,16 @@ def run_zeek(zeek, pcap, where, settings=()):
                         *settings], cwd=where, env=dict(os.environ, TZ="UTC"), capture_output=True, text=True)
     said = [x for x in r.stderr.splitlines() if x.strip() and "Overwriting packet analyzer mapping" not in x]
     check("Zeek runs without a message", r.returncode == 0 and not said, "\n".join(said)[:300])
-    hours = {}
+    hours, past = {}, rotation_offset()
     for path in sorted(glob.glob(os.path.join(where, "*.log"))):
-        m = re.fullmatch(r"([a-z_]+)\.(\d{4})-(\d\d)-(\d\d)-(\d\d)-\d\d-\d\d\.log", os.path.basename(path))
-        if m:                                       # completed logs only, grouped by the hour they cover
-            hour = calendar.timegm(tuple(int(x) for x in m.groups()[1:]) + (0, 0))
-            hours.setdefault(hour, []).append(path)
+        m = re.fullmatch(r"([a-z_]+)\.(\d{4})-(\d\d)-(\d\d)-(\d\d)-(\d\d)-(\d\d)\.log", os.path.basename(path))
+        if m:
+            # Completed logs only, grouped by the hourly run that finds them on the device. A log carries the
+            # time it was opened and is completed at the next rotation. (The first log of reports is opened at
+            # a full hour and completed a minute later: the run of that hour reads it.)
+            opened = calendar.timegm(tuple(int(x) for x in m.groups()[1:]))
+            done = ((opened - past) // H + 1) * H + past
+            hours.setdefault(done - past - H, []).append(path)
     # What Zeek writes when it stops stays in logs with their open names. On the device the next start
     # completes them (leftover rotation). Here they are handed over as the last hour.
     last = max(hours)
@@ -411,7 +523,9 @@ def run_zeek(zeek, pcap, where, settings=()):
 
 
 def record(work, hours, ifaces):
-    """Feed the completed logs to the anonymiser one hour at a time, as the timer does on the device."""
+    """Feed the completed logs to the anonymiser one hour at a time, as the timer does on the device.
+    hours: the logs by hour, the same for every capture port, or a list with those of each port."""
+    per_port = hours if isinstance(hours, list) else [hours] * len(ifaces)
     cfg = dict(pipeline.DEFAULTS, raw_dir=f"{work}/raw", data_dirs=[f"{work}/ssd", f"{work}/sd"], key_dir=f"{work}/key",
                state_dir=f"{work}/state", manage_services=False, interfaces=ifaces, sysfs_net=f"{work}/nosys",
                proc_swaps=f"{work}/noswaps", raise_errors=True, require_ram_disk=False, require_key_mount=False, rtc_epoch="")
@@ -420,12 +534,12 @@ def record(work, hours, ifaces):
         f.write("Filename Type Size Used Priority\n")
     pipeline.init_key(cfg["key_dir"])
     with open(os.path.join(cfg["key_dir"], "armed.json"), "w") as f:
-        json.dump({"approval_ref": "scenario test"}, f)
+        json.dump({"approval_ref": "scenario test 1"}, f)
     n_raw, st = 0, {}
-    for hour in sorted(hours):
+    for hour in sorted({h for x in per_port for h in x}):
         for n, i in enumerate(ifaces):
             os.makedirs(os.path.join(cfg["raw_dir"], i), exist_ok=True)
-            for path in hours[hour]:
+            for path in per_port[n].get(hour, []):
                 shutil.copy(path, os.path.join(cfg["raw_dir"], i))
                 if os.path.basename(path).split(".")[0] in ("conn", "open_conn"):
                     n_raw += sum(1 for _ in pipeline.read_log(path))
@@ -466,6 +580,7 @@ def flow_types(work, cfg, role="init"):
                                         FROM read_parquet('{out}/inc/inc_day.parquet') WHERE gran = 'svc'""").fetchall()
     pz = core.Pseudonymiser(pipeline.load_key(cfg["key_dir"]))
     name = {pz.device(mac): n for n, mac in NAMES.items()}
+    name.update({pz.device_by_ip(ip): n for n, ip in BY_ADDRESS.items()})
 
     def plain(text):
         for pseudonym, n in name.items():
@@ -518,8 +633,14 @@ def main():
           str(sorted({r.get("wc") for r in recs if r["rs"] == "wan"})))
     check("both routers are learned and are not devices", len(st["gateways"]) == 2 and not {"GW", "RX"} & {d for d, _, _ in got},
           f"{len(st['gateways'])} learned")
-    check("devices in two VLANs keep their own names through the router", not [r for r in recs if r["ib"]],
-          f"records with a side named by its address: {len([r for r in recs if r['ib']])}")
+    check("devices in two VLANs keep their own names through the router, only the dead name server is named by its address",
+          {(r["rp"], r["ib"], r["est"]) for r in recs if r["ib"]} == {(53, "r", False)},
+          f"records with a side named by its address: {sorted({(r['rp'], r['ib']) for r in recs if r['ib']})}")
+    check("the late answer keeps its history", {r["hist"] for r in recs if r["op"] == 9100 and r["rp"] == 50050} == {"H"},
+          str([(r["op"], r["hist"]) for r in recs if 9100 in (r["op"], r["rp"]) and 50050 in (r["op"], r["rp"])]))
+    early = sorted((r["rp"], r["hist"][:3], r["est"]) for r in recs if r["rp"] in (8843, 9102))
+    check("the answer captured before the question: the client is the originator, the letters read in that direction",
+          early == [(8843, "hS^", True), (9102, "hS^", True)], str(early))
     check("the vlan tag is kept", {r["vlan"] for r in recs if r["op"] == 40012} == {20}
           and {r["vlan"] for r in recs if r["op"] == 40060} == {10})
     text = ""
@@ -531,12 +652,14 @@ def main():
     check("no address or name in the output", core.scan_text(text) is None and not [s for s in SECRETS if s in text],
           str(core.scan_text(text) or [s for s in SECRETS if s in text]))
 
-    # roles decided by the port rules for every record (the registered sensitivity analysis): the only
-    # difference here is that equal ports on both sides are called symmetric
+    # roles decided by the port rules for every record (the registered sensitivity analysis): the differences
+    # here are that equal ports on both sides are called symmetric, and that the datagram which left port 137
+    # for a group counts as an answer from that port, which the group never asked for
     ports, _ = flow_types(os.path.join(a.work, "one"), cfg, role=None)
     differ = sorted(got ^ ports)
-    check("port rules for every record give the same types, except equal ports", differ == [
-        ("C1", 29, "17/out/5353@mcast:mdns"), ("C1", 29, "17/sym/5353@mcast:mdns")], str(differ))
+    check("port rules for every record give the same types, except equal ports and the datagram from a server port", differ == [
+        ("C1", 29, "17/out/5353@mcast:mdns"), ("C1", 29, "17/sym/5353@mcast:mdns"), ("D3", 29, "17/out/1900@mcast:ssdp")],
+        str(differ))
 
     cfg2, st2, n_raw2, _, _, _ = chain(a.zeek, os.path.join(a.work, "two"), ifaces=("eth1", "eth2"))
     def strip(rs):
@@ -553,13 +676,20 @@ def main():
     got5, _ = flow_types(os.path.join(a.work, "three"), cfg5)
     check("three capture ports give the same flow types", got5 == want)
 
+    got6, want6, dup6, n6 = two_views(a.zeek, os.path.join(a.work, "views"))
+    check("two ports that see a flow differently (order around a full hour, a missed first frame): the flow types of one port",
+          got6 == want6, f"unexpected {sorted(got6 - want6)}, missing {sorted(want6 - got6)}, {dup6} copies, {n6} records")
+
     cfg3, st3, _, _, n3, _ = chain(a.zeek, os.path.join(a.work, "double"), double=True)
     got3, _ = flow_types(os.path.join(a.work, "double"), cfg3)
     recs3 = [r for r in outputs(cfg3) if not r.get("open")]
     check("every frame doubled (both directions mirrored): the same flow types", got3 == want,
           f"{n3} frames, unexpected {sorted(got3 - want)}, missing {sorted(want - got3)}")
+    # Both sides together: in a record that Zeek turned round after its first packets, the packets seen before
+    # the turn stay counted for the other side (the two records of the early answer).
     check("every frame doubled: packet counts double, which is why they are not used",
-          sum(r["opk"] for r in recs3) == 2 * sum(r["opk"] for r in finals))
+          sum(r["opk"] + r["rpk"] for r in recs3) == 2 * sum(r["opk"] + r["rpk"] for r in finals),
+          f"{sum(r['opk'] + r['rpk'] for r in finals)} and {sum(r['opk'] + r['rpk'] for r in recs3)} packets")
     for name, double in (("quiet", False), ("quiet-double", True)):
         cfg4, _, _, want4, _, _ = chain(a.zeek, os.path.join(a.work, name), double=double, capture=build_quiet)
         got4, _ = flow_types(os.path.join(a.work, name), cfg4)

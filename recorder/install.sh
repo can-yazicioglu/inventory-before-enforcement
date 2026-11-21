@@ -79,8 +79,15 @@ else
     }
 fi
 
+# Lines are appended to two files below. A file that does not end with a line break (saved by an editor that
+# leaves it out) would get the first new line glued to its last line.
+end_with_newline() {
+    if [ -s "$1" ] && [ -n "$(tail -c 1 "$1")" ]; then echo >> "$1"; fi
+}
+
 echo "== raw logs in RAM, no swap, journal in RAM"
 touch "$R/etc/fstab"
+end_with_newline "$R/etc/fstab"
 grep -q ' /run/ibe ' "$R/etc/fstab" || \
     echo 'tmpfs /run/ibe tmpfs rw,nosuid,nodev,noexec,mode=0700,size=2G 0 0' >> "$R/etc/fstab"
 # Swap would let the kernel write RAM, and with it the raw logs, to the disk. All of it goes: swap
@@ -134,6 +141,7 @@ echo "== radios off, clock battery charging on, PCIe connector on (Raspberry Pi 
 rfkill block all 2>/dev/null || true
 CFG="$R/boot/firmware/config.txt"
 if [ -f "$CFG" ]; then
+    end_with_newline "$CFG"
     # pciex1: the PCIe connector is off by default unless a HAT+ with an ID EEPROM is attached
     for line in dtoverlay=disable-wifi dtoverlay=disable-bt dtparam=rtc_bbat_vchg=3000000 dtparam=pciex1; do
         grep -qx "$line" "$CFG" || echo "$line" >> "$CFG"

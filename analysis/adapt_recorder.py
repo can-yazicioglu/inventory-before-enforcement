@@ -56,6 +56,7 @@ COLUMNS = {"ts": "BIGINT", "proto": "VARCHAR", "ipp": "INTEGER", "op": "INTEGER"
 OPEN = "coalesce(open, false)"
 # Who opened the flow is unknown. TCP: neither the originator's SYN (S) nor the responder's SYN-ACK (h) is in
 # the history. UDP: Zeek turned the record around (^), because its first packet came from a server port.
+# (The recorder writes every letter in the direction of the record, also those from before Zeek turned it.)
 UNKNOWN = ("((proto = 'tcp' AND NOT regexp_matches(coalesce(hist, ''), '[Sh]'))"
            " OR (proto = 'udp' AND starts_with(coalesce(hist, ''), '^')))")
 # ICMP error messages (IPv4: destination unreachable, source quench, redirect, time exceeded, parameter

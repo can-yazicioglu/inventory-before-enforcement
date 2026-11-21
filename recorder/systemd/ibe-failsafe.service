@@ -3,7 +3,13 @@ Description=IBE recorder: the hourly job failed, stop capture and empty the RAM 
 
 [Service]
 Type=oneshot
+# a command that hangs must not keep this unit busy: it could then not be started for the next failure
+TimeoutStartSec=120
+Environment=PYTHONPATH=/opt/ibe
 # The pattern stops every running capture. Capture starts again after the next hourly job that succeeds.
 # The leading minus: the RAM disk is emptied also if stopping reports an error.
 ExecStart=-/usr/bin/systemctl stop ibe-zeek@*.service
 ExecStart=/usr/bin/find /run/ibe/raw -mindepth 1 -delete
+# Last, and only if the two commands above did their work: the status and the light say that capture is off.
+# Without this they would go on showing the state of the last run that succeeded.
+ExecStart=-/usr/bin/python3 -m ibe_recorder --config /etc/ibe/config.json failed

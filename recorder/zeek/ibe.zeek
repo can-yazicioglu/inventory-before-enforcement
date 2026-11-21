@@ -16,6 +16,10 @@
 @load policy/tuning/json-logs
 
 redef Log::default_rotation_interval = 1 hr;
+# One minute past the hour, not on it. The reports about connections that are still open are written when
+# the clock passes the full hour (see below). With a rotation at that very moment they would go into the new
+# log and wait there, in RAM, for another hour: a power cut would take the reports of two hours with it.
+redef log_rotate_base_time = "0:01";
 redef LogAscii::use_json = T;
 # a log left open by a crash or a restart is rotated at the next start instead of being overwritten
 redef LogAscii::enable_leftover_log_rotation = T;

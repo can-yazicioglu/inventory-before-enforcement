@@ -19,12 +19,13 @@ import math
 import os
 import re
 import subprocess
+import tempfile
 import time
 from zoneinfo import ZoneInfo
 
 from . import core
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 MIN_EPOCH = 1793491200          # 2026-11-01 UTC. A clock before this date was never set.
 DEFAULTS = {
     "site": "A",
@@ -65,6 +66,14 @@ LABEL_OK = re.compile(r"[A-Za-z0-9 _+/().\-]{0,40}")
 # by a pattern: the site reads devices.json before it hands the data over.
 ADDRESS_LIKE = re.compile(r"(?:\d{1,3}[^0-9A-Za-z]){3}\d{1,3}|\d{8}|(?:[0-9A-Fa-f]{2}[^0-9A-Za-z]?){5}[0-9A-Fa-f]{2}"
                           r"|(?:[0-9A-Fa-f]{4}[^0-9A-Za-z]){2}[0-9A-Fa-f]{4}|\.[A-Za-z]")
+# The same shapes once every run of separators is read as one dot ("192. 168. 1. 20", "aa__bb__cc__00__00__01"),
+# and eight hexadecimal digits that stand alone (an IPv4 address written as one number).
+ADDRESS_SQUEEZED = re.compile(r"(?:\d{1,3}\.){3}\d{1,3}|(?:[0-9A-Fa-f]{2}\.){5}[0-9A-Fa-f]{2}"
+                              r"|(?<![0-9A-Za-z])(?:0[xX])?[0-9A-Fa-f]{8}(?![0-9A-Za-z])")
+# The names Windows gives a computer when nobody chooses one.
+DEFAULT_HOST_NAME = re.compile(r"(?i)(?<![0-9A-Za-z])(?:DESKTOP|LAPTOP|WIN|MINWINPC)-[0-9A-Z]{7,11}(?![0-9A-Za-z])")
+NAME_PORTS = (137, 5353, 5355)              # NetBIOS name service, mDNS, LLMNR
+MAX_NAMES_SEEN = 200000                     # names kept (a browser asks for made-up names at every start)
 SWITCH_OK = re.compile(r"[A-Za-z0-9]{0,3}")          # "a letter for the switch"
 VOCAB = {
     "type": {"", "pc", "server", "vm", "ip_phone", "printer", "camera", "nvr", "storage", "medical_device",
@@ -230,7 +239,14 @@ def is_armed(key_dir):
     """Armed means: a file on the key stick names the ethics approval under which recording runs."""
     ref = _json_state(os.path.join(key_dir, "armed.json"), {})
     ref = ref.get("approval_ref") if isinstance(ref, dict) else None
-    return isinstance(ref, str) and len(ref.strip()) >= 3
+    return approval_ref_ok(ref)
+
+
+def approval_ref_ok(ref):
+    """A date and a number: at least three characters with a digit among them. The placeholder of the
+    instructions ("<date and number>") is not a reference."""
+    return isinstance(ref, str) and len(ref.strip()) >= 3 and any(c.isdigit() for c in ref) \
+        and "<" not in ref and ">" not in ref
 
 
 def config_problem(cfg):
@@ -313,17 +329,94 @@ def _usable(cfg):
 
 def state_writable(state_dir):
     """The day count and the STOP mark live in this directory. If they cannot be saved the limit cannot be kept."""
-    probe = os.path.join(state_dir, ".write-test")
+    # A probe file of its own for every check. The capture units of all ports and the hourly job run this
+    # check, at boot at the same moment: with one shared name each would remove the probe of the other and
+    # report a directory that cannot be written.
+    probe = None
     try:
         os.makedirs(state_dir, exist_ok=True)
-        with open(probe, "wb") as f:
+        fd, probe = tempfile.mkstemp(prefix=".write-test.", dir=state_dir)
+        with os.fdopen(fd, "wb") as f:
             f.write(b"x" * 4096)
             f.flush()
             os.fsync(f.fileno())
-        os.remove(probe)
         return True
     except OSError:
         return False
+    finally:
+        if probe:
+            _remove(probe)
+
+
+def _count(x):
+    return isinstance(x, int) and not isinstance(x, bool) and 0 <= x < 2 ** 62
+
+
+def _number(x):
+    return core._finite(x) and abs(x) < 1e12
+
+
+def _text(x, maxlen=300):
+    return isinstance(x, str) and len(x) <= maxlen
+
+
+def _list(of):
+    return lambda x: isinstance(x, list) and all(of(e) for e in x)
+
+
+def _dict(of):
+    return lambda x: isinstance(x, dict) and all(isinstance(k, str) and of(v) for k, v in x.items())
+
+
+def _maybe(of):
+    return lambda x: x is None or of(x)
+
+
+# What the state file may hold, entry by entry. The file is read at every run and its content goes into every
+# copy of the status. An entry of another type (a file edited by hand, a damaged file that is still JSON)
+# would end the run before capture is started again, every hour, or put foreign text into the copies.
+STATE_ENTRIES = {
+    "days": (_list(_text), list),
+    "files": (_count, int),
+    "records_out": (_count, int),
+    "records_open": (_count, int),
+    "records_dropped": (_dict(_count), dict),
+    "history_unknown": (_count, int),
+    "export_encrypted": (_count, int),
+    "neighbours": (_count, int),
+    "devices_labelled": (_count, int),
+    "devices_in_table": (_count, int),
+    "last_run": (_number, int),
+    "errors": (_list(lambda e: isinstance(e, dict) and set(e) == {"t", "e"} and _number(e["t"]) and _text(e["e"])), list),
+    "clock_jumps": (_list(lambda e: isinstance(e, dict) and set(e) == {"t", "back_s"} and all(map(_number, e.values()))), list),
+    "key_changes": (_list(lambda e: isinstance(e, dict) and set(e) == {"t", "from", "to"} and _number(e["t"])
+                          and all(_text(e[k], 16) and re.fullmatch(r"[0-9a-f]*", e[k]) for k in ("from", "to"))), list),
+    "clock_ref": (_list(_number), list),
+    "key_id": (lambda x: _text(x, 16) and bool(re.fullmatch(r"[0-9a-f]+", x)), str),
+    "links": (_dict(_dict(_maybe(_count))), dict),
+    "quality_last": (_dict(lambda q: isinstance(q, dict)), dict),
+    "devices_seen": (_list(lambda x: _text(x, 11) and bool(re.fullmatch(r"[di][a-z2-7]{10}", x))), list),
+    "gateways": (_list(lambda x: _text(x, 11) and bool(re.fullmatch(r"d[a-z2-7]{10}", x))), list),
+    "device_table_problems": (_list(lambda x: _text(x, 120)), list),
+}
+
+
+STATE_ALWAYS = ("days", "files", "records_out", "records_dropped", "errors", "last_run")
+
+
+def clean_state(st):
+    """The entries of a state file that have the type this program writes. The rest starts afresh."""
+    out = {}
+    for k, (ok, default) in STATE_ENTRIES.items():
+        try:
+            good = isinstance(st, dict) and k in st and ok(st[k])
+        except (TypeError, ValueError, OverflowError, RecursionError):
+            good = False
+        if good:
+            out[k] = st[k]
+        elif k in STATE_ALWAYS:
+            out[k] = default()
+    return out
 
 
 def known_days(cfg, st):
@@ -441,33 +534,74 @@ def _device_mac(mac, gateways):
 
 
 def dedup(records, window, gateways=frozenset()):
-    """Drop the second copy of a connection that was captured on two mirror ports.
+    """Drop the copies of a connection that was captured on two or three mirror ports.
 
     The copy that names more endpoints by their own MAC address is kept, then the fuller one.
+
+    A capture port sees a connection once. So a second record from a port that has already given its copy
+    is a new connection (the same ports used again), not a copy. When the same addresses and ports are used
+    again within the window, a record from another port is the copy of the kept record with the same
+    content (history and packet counts), else of the oldest one that has no copy from that port yet.
+
+    A report about an open connection belongs to the clock hour of its time: the report written at the
+    full hour and the last report of a connection that ends just after it are two records, however close
+    together. (The Zeek script stamps a report inside the hour it reports on, on every port.)
+
+    A port that missed the first frame of an exchange writes its record the other way round (the answer
+    looks like the opening). Such a record is a copy too: of the two, the one that began earlier saw the
+    first frame and is kept.
     """
     def weight(x):
         macs = sum(_device_mac(x.get(f), gateways) for f in ("orig_l2_addr", "resp_l2_addr"))
         return macs, core._int(x.get("orig_pkts")) + core._int(x.get("resp_pkts"))
 
-    seen, out, dropped = {}, [], 0
+    def began(x):
+        # a report is stamped with the last packet it covers and carries the age of the connection at that time
+        return _float(x.get("ts")) - (_float(x.get("duration")) if x.get("_open") else 0.0)
+
+    def twin(x, y):
+        return all(x.get(f) == y.get(f) for f in ("history", "orig_pkts", "resp_pkts"))
+
+    groups, out, ports, dropped = {}, [], [], 0      # groups: the kept records of one pair of ends, oldest first
     for iface, r in sorted(records, key=lambda x: _float(x[1].get("ts"))):
-        # a request from the unspecified address (DHCP, duplicate address detection) has the same addresses and
-        # ports whichever device sends it: there the sender's MAC address tells two devices from two copies
-        # Flows without ports of two different IP protocols share the word 'unknown_transport' and the ports 0.
-        ipp = r.get("ip_proto")
-        k = (r.get("proto"), ipp if isinstance(ipp, int) else None, r.get("id.orig_h"), r.get("id.orig_p"),
-             r.get("id.resp_h"), r.get("id.resp_p"), bool(r.get("_open")),
-             str(r.get("orig_l2_addr") or "").lower() if r.get("id.orig_h") in ("0.0.0.0", "::") else None)
         ts = _float(r.get("ts"))
-        j = seen.get(k)
-        if j is not None and out[j][0] != iface and ts - _float(out[j][1].get("ts")) <= window:
-            dropped += 1
-            if weight(r) > weight(out[j][1]):
-                out[j] = (iface, r)
+        ipp = r.get("ip_proto")
+        # Flows without ports of two different IP protocols share the word 'unknown_transport' and the ports 0.
+        head = (r.get("proto"), ipp if isinstance(ipp, int) else None)
+        o, d = (r.get("id.orig_h"), r.get("id.orig_p")), (r.get("id.resp_h"), r.get("id.resp_p"))
+        # a request from the unspecified address (DHCP, duplicate address detection) has the same addresses and
+        # ports whichever device sends it: there the sender's MAC address tells two devices from two copies,
+        # and no record the other way round is a copy of it
+        unspecified = r.get("id.orig_h") in ("0.0.0.0", "::")
+        tail = (int(ts // 3600) if r.get("_open") else None,
+                str(r.get("orig_l2_addr") or "").lower() if unspecified else None)
+        # the two ends in one order whichever of them the record calls the originator
+        k = head + (o + d if unspecified or repr(o) <= repr(d) else d + o) + tail
+        live = [j for j in groups.get(k, ()) if 0 <= ts - _float(out[j][1].get("ts")) <= window]
+        groups[k] = live
+        fit = [j for j in live if iface not in ports[j]]
+        # written the same way round as this record
+        same = [j for j in fit if (out[j][1].get("id.orig_h"), out[j][1].get("id.orig_p")) == o]
+        j = next((j for j in same if twin(out[j][1], r)), same[0] if same else fit[0] if fit else None)
+        if j is None:
+            live.append(len(out))
+            out.append((iface, r))
+            ports.append({iface})
             continue
-        seen[k] = len(out)
-        out.append((iface, r))
+        dropped += 1
+        ports[j].add(iface)
+        kept = out[j][1]
+        if weight(r) > weight(kept) if j in same else began(r) < began(kept):
+            out[j] = (iface, r)
     return out, dropped
+
+
+def _is_ip(text):
+    try:
+        ipaddress.ip_address(text)
+        return True
+    except ValueError:
+        return False
 
 
 def _float(v):
@@ -513,15 +647,19 @@ def learn_gateways(records, scope, state, threshold, neigh=None, fwd_threshold=2
                 if a.is_multicast or a.is_unspecified or str(a) == "255.255.255.255":
                     continue
                 m = core.norm_mac(mac)
-                if neigh is not None and neigh.at(ip, ts):
+                local = scope.is_local_ip(ip)
+                if neigh is not None and neigh.at(ip, ts) and (local or neigh.at(ip, ts) == m):
                     owner = neigh.live_at(ip, ts)
                     if owner and owner != m and not neigh.owned_by(str(a), m):
                         f = fwd.setdefault(m, set())
                         if len(f) <= fwd_threshold:
                             f.add(str(a))
                     continue                       # on the local link: not an address behind a router
-                if scope.is_local_ip(ip):
+                if local:
                     continue
+                # An address outside the local networks counts as a network behind this MAC address unless the
+                # MAC address itself answers for it. What the neighbour table says about a remote address
+                # (the table is on the key stick, and any device can add to it) does not hide a router.
                 n = nets.setdefault(m, set())
                 if len(n) <= threshold:
                     n.add(core._net_of(ip))
@@ -540,17 +678,21 @@ def load_neighbours(path, sightings):
     return neigh, n
 
 
-def build_ip2dom(dns_recs, ssl_recs, cache, now, scope=None, ttl=86400, cap=200000):
+def build_ip2dom(dns_recs, ssl_recs, cache, now, scope=None, ttl=86400, cap=200000, neigh=None):
     """Remote address to name map from DNS answers and TLS server names. Kept in RAM, one day at most.
 
-    Names of local addresses (the site's own host names) are never kept.
+    Names of local addresses (the site's own host names) are never kept: not for an address in the local
+    networks, and not for an address that a device answers for on the mirrored network.
     """
+    def own(ip):
+        return bool(scope and scope.is_local_ip(ip)) or bool(neigh is not None and neigh.at(ip, now))
+
     def put(ip, name):
         try:
             ip = str(ipaddress.ip_address(ip))
         except ValueError:
             return
-        if isinstance(name, str) and 0 < len(name) <= 253 and not (scope and scope.is_local_ip(ip)):
+        if isinstance(name, str) and 0 < len(name) <= 253 and not own(ip):
             cache[ip] = [name, now]
     for r in dns_recs:
         answers = r.get("answers")
@@ -560,9 +702,10 @@ def build_ip2dom(dns_recs, ssl_recs, cache, now, scope=None, ttl=86400, cap=2000
     for r in ssl_recs:
         if isinstance(r.get("id.resp_h"), str):
             put(r["id.resp_h"], r.get("server_name"))
+    # 0 <=: a name stamped in the future (the clock was set back since) would stay until the clock has caught up
     live = {k: v for k, v in cache.items() if isinstance(v, list) and len(v) == 2
-            and isinstance(v[1], (int, float)) and now - v[1] <= ttl and isinstance(v[0], str) and v[0]
-            and not (scope and scope.is_local_ip(k))}
+            and isinstance(v[1], (int, float)) and not isinstance(v[1], bool) and 0 <= now - v[1] <= ttl
+            and isinstance(v[0], str) and v[0] and isinstance(k, str) and _is_ip(k) and not own(k)}
     if len(live) > cap:
         live = dict(sorted(live.items(), key=lambda kv: -kv[1][1])[:cap])
     return live
@@ -596,7 +739,52 @@ def _read_device_rows(path, problems=None):
     return rows
 
 
-def load_devices(key_dir, pz):
+def _plain(text):
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def host_names(dns_recs, scope=None, neigh=None, now=0):
+    """The names by which the devices of the site call each other: what they ask for and announce in the
+    name services of the local link (NetBIOS, mDNS, LLMNR), and names that DNS resolves to a local address.
+    Returns {name without separators, lower case: True if the name has a digit or a separator}. Names of
+    services ("_ipp._tcp.local" and the printer or camera that offers one) are not names of computers."""
+    out = {}
+    for r in dns_recs:
+        q = r.get("query")
+        if not isinstance(q, str) or not 0 < len(q) <= 253 or "._tcp" in q.lower() or "._udp" in q.lower():
+            continue
+        answers = r.get("answers") if isinstance(r.get("answers"), list) else []
+        local = any(isinstance(a, str) and _is_ip(a) and ((scope is not None and scope.is_local_ip(a))
+                                                          or (neigh is not None and neigh.at(a, now))) for a in answers)
+        if r.get("id.resp_p") in NAME_PORTS or local:
+            label = q.strip().strip(".").split(".")[0]
+            plain = _plain(label)
+            if not label.startswith("_") and 4 <= len(plain) <= 63:
+                out[plain] = out.get(plain, False) or plain != label.lower() or any(c.isdigit() for c in plain)
+    return out
+
+
+def load_names(path, new=None):
+    """The host names seen so far (key stick, stays on site) together with those of this hour."""
+    names = {}
+    old = _json_state(path, {})
+    for src in (old if isinstance(old, dict) else {}, new or {}):
+        for k, v in src.items():
+            if isinstance(k, str) and re.fullmatch(r"[a-z0-9]{4,63}", k) and len(names) < MAX_NAMES_SEEN:
+                names[k] = bool(names.get(k)) or v is True
+    return names
+
+
+def names_a_host(text, names):
+    """True if a label is the name of a computer of the site: the whole label, or a part of it where the
+    name is one that cannot be an everyday word (it has a digit or a separator, like MUAYENE-PC03)."""
+    plain = _plain(text)
+    if not plain or not names:
+        return False
+    return plain in names or any(marked and len(n) >= 6 and n in plain for n, marked in names.items())
+
+
+def load_devices(key_dir, pz, names=None):
     """IT officer's table. Returns {pseudonym: labels}. Unsafe label text is refused, not written."""
     out, problems = {}, []
     for n, row in enumerate(_read_device_rows(os.path.join(key_dir, "devices.csv"), problems), 2):
@@ -604,6 +792,8 @@ def load_devices(key_dir, pz):
         for c in DEVICE_COLUMNS[2:]:
             v = row.get(c, "")
             if not LABEL_OK.fullmatch(v) or core.scan_text(v) or ADDRESS_LIKE.search(v) \
+                    or ADDRESS_SQUEEZED.search(re.sub(r"[^0-9A-Za-z]+", ".", v)) or DEFAULT_HOST_NAME.search(v) \
+                    or (c in ("brand", "model") and names_a_host(v, names)) \
                     or (c in VOCAB and v not in VOCAB[c]) or (c == "switch" and not SWITCH_OK.fullmatch(v)):
                 problems.append(f"line {n}: column {c} refused")
                 v = ""
@@ -620,7 +810,8 @@ def load_devices(key_dir, pz):
     return out, problems
 
 
-NOT_PRIVATE = "a network outside the private ranges can only be set in the configuration"
+NOT_PRIVATE = "a network outside the private ranges or outside the local networks of the configuration " \
+              "can only be set in the configuration"
 
 
 def update_observed(key_dir, records, scope, gateways, neigh=None):
@@ -890,14 +1081,10 @@ def run_once(cfg, now=None):
     if problem:
         cfg = _usable(cfg)                 # enough to stop capture, empty the RAM and say why
     status_path = os.path.join(cfg["state_dir"], "status.json")
-    st = _json_state(status_path, {})
-    if not isinstance(st, dict):
-        st = {}
-    for k, v in (("days", []), ("records_out", 0), ("records_dropped", {}), ("errors", []), ("files", 0)):
-        st.setdefault(k, v)
+    st = clean_state(_json_state(status_path, {}))
     st["days"] = known_days(cfg, st)
     st["files"] = known_batches(cfg, st)
-    last = st.get("last_run", 0)
+    last = st["last_run"]
     st.update(version=VERSION, site=cfg["site"], state="ok", warnings=[])
     # addresses of the site's own routers and networks are given on the key stick, so they stay on site
     site = _json_state(os.path.join(cfg["key_dir"], "site.json"), None)
@@ -908,14 +1095,14 @@ def run_once(cfg, now=None):
         if isinstance(v, list) and v and all(isinstance(x, str) for x in v):
             try:
                 [core.norm_mac(x) for x in v] if k == "gateway_macs" else core.Scope(v)
-                if k == "local_nets" and (core.nets_problem(v) or core.public_nets(v)):
-                    # A host in a local network is named by a token of its address. For addresses outside the
-                    # private ranges that needs the site's written permission, which the stick cannot give:
-                    # such a network can only be set in the configuration. (A public address that devices use
-                    # on the local link is recognised by itself, through the neighbour table.)
+                if k == "local_nets" and (core.nets_problem(v) or core.public_nets(v)
+                                          or not core.nets_within(v, cfg["local_nets"])):
+                    # A host in a local network is named by a token of its address. Which networks that may
+                    # be is decided before the device is shipped, with the site's written permission: the
+                    # stick can take networks away from the list of the configuration and cannot add any.
                     raise ValueError(NOT_PRIVATE)
                 cfg = dict(cfg, **{k: v})
-            except ValueError as e:
+            except (ValueError, TypeError) as e:           # TypeError: the list of the configuration is broken
                 st["warnings"].append(f"site.json: {k} ignored, " + (NOT_PRIVATE if str(e) == NOT_PRIVATE else "bad value"))
     if not config_problem(cfg) and core.public_nets(cfg["local_nets"]):
         st["warnings"].append(f"{core.public_nets(cfg['local_nets'])} of the local networks in the configuration are public "
@@ -942,6 +1129,12 @@ def run_once(cfg, now=None):
         return _finish(cfg, st, status_path)
     if why:
         _stop(cfg, st, why)
+        return _finish(cfg, st, status_path)
+    if now + 3600 < last and len(st["days"]) >= cfg["max_recording_days"] \
+            and datetime.datetime.fromtimestamp(now, ZoneInfo(cfg["timezone"])).date().isoformat() != max(st["days"]):
+        # Every permitted day is counted and the clock was set back to another day. Records of that day
+        # would pass as late records of a counted day: nothing more is written, whatever the clock shows.
+        _stop(cfg, st, f"limit of {cfg['max_recording_days']} recording days reached", permanent=True)
         return _finish(cfg, st, status_path)
 
     stray = stray_dirs(cfg)
@@ -1067,22 +1260,36 @@ def _process(cfg, st, now, files):
                 conn.append((n, r))
     quality = capture_quality(files, cfg["interfaces"])
     n_written = 0
-    cache_path = os.path.join(raw, "ip2dom.json")            # RAM only
-    cache = _json_state(cache_path, {})
-    ip2dom = build_ip2dom((r for _, p in of_kind(files, "dns") for r in read_log(p)),
-                          (r for _, p in of_kind(files, "ssl") for r in read_log(p)),
-                          cache if isinstance(cache, dict) else {}, now, scope)
-    _write_atomic(cache_path, json.dumps(ip2dom).encode())   # also in an hour without connections: names expire
     neigh_path = os.path.join(cfg["key_dir"], "neighbours.json")    # holds real addresses, stays on site
     neigh, n_seen = load_neighbours(neigh_path, (r for _, p in of_kind(files, "neigh") for r in read_log(p)))
     st["neighbours"] = len(neigh.table)
+    cache_path = os.path.join(raw, "ip2dom.json")            # RAM only
+    cache = _json_state(cache_path, {})
+    dns = [r for _, p in of_kind(files, "dns") for r in read_log(p)]
+    ip2dom = build_ip2dom(dns, (r for _, p in of_kind(files, "ssl") for r in read_log(p)),
+                          cache if isinstance(cache, dict) else {}, now, scope, neigh=neigh)
+    # the names of the site's own computers, to refuse them where a brand or a model is expected
+    names_path = os.path.join(cfg["key_dir"], "names_seen.json")    # holds real names, stays on site
+    new_names = host_names(dns, scope, neigh, now)
+    host = load_names(names_path, new_names)
+    del dns
+    if len(host) >= MAX_NAMES_SEEN:
+        st["warnings"].append("the list of computer names on the key stick is full: new names are no longer "
+                              "recognised in the device table")
+    if new_names:
+        try:
+            _write_atomic(names_path, json.dumps(host, sort_keys=True).encode())
+        except OSError as e:
+            st["errors"].append({"t": now, "e": f"cannot write to key stick: {e.strerror}"})
+    _write_atomic(cache_path, json.dumps(ip2dom).encode())   # also in an hour without connections: names expire
     odd = sum(1 for ip in neigh.table if not scope.is_local_ip(ip))
     if odd:
         # Such a site has networks of its own that the list does not know. A host of the site in another of
         # them, behind a router, is written as a remote host ('wan') and cannot be told apart later.
-        st["warnings"].append(f"{odd} addresses on the local link are outside the local networks: if the site has more "
-                              "networks of that kind, they must be listed in the configuration (local_nets), or its "
-                              "hosts behind a router are recorded as remote hosts")
+        st["warnings"].append(f"{odd} addresses on the local link are outside the local networks: a device is "
+                              "recorded under such an address only where its own frames are captured. If the site "
+                              "has networks of that kind, they must be listed in the configuration (local_nets), "
+                              "or their hosts behind a router are recorded as remote hosts")
     if n_seen:
         try:
             _write_atomic(neigh_path, json.dumps(neigh.dump(now)).encode())
@@ -1098,12 +1305,14 @@ def _process(cfg, st, now, files):
     conn, n_dup = dedup(conn, cfg["dedup_window_s"], gateways)
     dropped["duplicate"] = dropped.get("duplicate", 0) + n_dup
 
-    labels, problems = load_devices(cfg["key_dir"], pz)
+    labels, problems = load_devices(cfg["key_dir"], pz, host)
     categories = set(cat.rules.values()) | set(core.PORT_CATEGORY.values()) | {"other", "unknown"}
-    unclassified, lines, days, devs, n_open = {}, [], set(st["days"]), set(), 0
+    unclassified, lines, days, devs, n_open, odd_history = {}, [], set(st["days"]), set(), 0, 0
     for iface, r in conn:
         rec, why = core.transform(r, pz, scope, gateways, cfg["wan_tokens"], names, psl, cat, iface,
                                   bool(r.get("_open")), neigh)
+        if rec is not None and r.get("history") and not rec["hist"]:
+            odd_history += 1                       # a letter this version does not know: written without history
         if rec is not None and not MIN_EPOCH <= rec["ts"] <= now + 86400:
             rec, why = None, "bad_time"            # stamped by a clock that was not set
         if rec is not None and core.leak_check(rec, categories):
@@ -1129,6 +1338,10 @@ def _process(cfg, st, now, files):
         # the router) would otherwise stay in this list, and in every copy of the status, for good.
         devs.update(x for x, sent in ((rec["o"], rec["opk"] > 0), (rec["r"], rec["rpk"] > 0))
                     if sent and x[0] in "di" and len(x) == 11)
+    if odd_history:
+        st["history_unknown"] = st.get("history_unknown", 0) + odd_history
+        st["warnings"].append(f"{odd_history} records had a connection history with a letter this version does not "
+                              "know and were written without it")
     text = "\n".join(lines) + "\n"
     problem = core.scan_text(text)
     if problem:
@@ -1188,6 +1401,49 @@ def _process(cfg, st, now, files):
     return n_written, quality
 
 
+def _status_copies(cfg, st):
+    """The copies of the status on the data directories and the key stick. They leave the site."""
+    blob = json.dumps(st, indent=1, sort_keys=True).encode()
+    if core.scan_text(blob.decode()):
+        blob = json.dumps({"version": VERSION, "state": "status withheld by leak scan",
+                           "last_run": st.get("last_run"), "days": st.get("days")}).encode()
+    targets = [os.path.join(d, "status.json") for d in cfg["data_dirs"]]
+    if key_dir_ok(cfg) and os.path.exists(os.path.join(cfg["key_dir"], "hmac.key")):       # the stick is plugged in
+        targets.append(os.path.join(cfg["key_dir"], "status.json"))
+    for p in targets:
+        try:
+            _write_atomic(p, blob)
+        except OSError:
+            pass
+
+
+FAILED = "the hourly job failed or was ended, capture starts again after the next run that succeeds"
+
+
+def mark_failed(cfg, now=None):
+    """Say in the status and with the light that capture is off. Called by the fail-safe unit after the
+    hourly job failed, hung or was ended by the system. The unit has stopped capture and emptied the RAM disk
+    by then. Both are done here once more, so that the status never says "stopped" while something records.
+    Nothing is counted: the next hourly run starts from the same days and batches."""
+    now = int(now or time.time())
+    if config_problem(cfg):
+        cfg = _usable(cfg)
+    status_path = os.path.join(cfg["state_dir"], "status.json")
+    st = clean_state(_json_state(status_path, {}))
+    st["days"], st["files"] = known_days(cfg, st), known_batches(cfg, st)
+    st.update(version=VERSION, site=cfg["site"], recording_days=len(st["days"]),
+              warnings=["the hourly job failed or was ended before it finished"])
+    _stop(cfg, st, FAILED)
+    st["errors"] = (st["errors"] + [{"t": now, "e": "the hourly job failed or was ended, the hour was not written"}])[-50:]
+    try:
+        _write_atomic(status_path, json.dumps(st, indent=1, sort_keys=True).encode())
+    except OSError:
+        pass
+    _status_copies(cfg, st)
+    set_led(cfg, st["state"])
+    return st
+
+
 def _finish(cfg, st, status_path):
     try:
         usage = os.statvfs(cfg["data_dirs"][0])
@@ -1212,18 +1468,7 @@ def _finish(cfg, st, status_path):
         st["state"] = "stopped: the state directory cannot be written"
         _services(cfg, "stop")
         purge_raw(cfg, everything=True)
-    blob = json.dumps(st, indent=1, sort_keys=True).encode()
-    if core.scan_text(blob.decode()):          # the copies of the status leave the site
-        blob = json.dumps({"version": VERSION, "state": "status withheld by leak scan",
-                           "last_run": st.get("last_run"), "days": st.get("days")}).encode()
-    targets = [os.path.join(d, "status.json") for d in cfg["data_dirs"]]
-    if key_dir_ok(cfg) and os.path.exists(os.path.join(cfg["key_dir"], "hmac.key")):       # the stick is plugged in
-        targets.append(os.path.join(cfg["key_dir"], "status.json"))
-    for p in targets:
-        try:
-            _write_atomic(p, blob)
-        except OSError:
-            pass
+    _status_copies(cfg, st)
     try:
         encrypt_exports(cfg, only=("status.json",))        # the copy in 'export' shows the status just written
     except OSError:

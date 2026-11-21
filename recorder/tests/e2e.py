@@ -73,12 +73,19 @@ def secrets_of(logs):
 
 
 def write_day(logs, raw, iface, shift, tag, jitter=0.0):
+    """The logs of one day for one capture port. jitter: this port sees every frame that much later.
+    A report about an open connection stays in its clock hour: the Zeek script stamps a report inside the
+    hour it reports on (with the time of the last packet before the full hour, or a millisecond before the
+    full hour), so two ports never disagree about the hour of a report."""
     d = os.path.join(raw, iface)
     os.makedirs(d, exist_ok=True)
     for stem, recs in logs.items():
         with open(os.path.join(d, f"{stem}.{tag}.log"), "w", encoding="utf-8") as f:
             for r in recs:
-                f.write(json.dumps(dict(r, ts=r["ts"] + shift + jitter)) + "\n")
+                ts = r["ts"] + shift
+                if stem != "open_conn" or (ts + jitter) // 3600 == ts // 3600:
+                    ts += jitter
+                f.write(json.dumps(dict(r, ts=ts)) + "\n")
 
 
 def record_side(work, logs, days, ifaces, shift0, tokens):
@@ -91,7 +98,7 @@ def record_side(work, logs, days, ifaces, shift0, tokens):
         f.write("Filename Type Size Used Priority\n")
     pipeline.init_key(cfg["key_dir"])
     with open(os.path.join(cfg["key_dir"], "armed.json"), "w") as f:
-        json.dump({"approval_ref": "end-to-end test"}, f)
+        json.dump({"approval_ref": "end-to-end test 1"}, f)
     t_end = max(r["ts"] for r in logs["conn"] + logs["open_conn"])
     st = {}
     for k in range(days):

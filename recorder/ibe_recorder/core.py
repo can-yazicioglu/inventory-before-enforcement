@@ -38,7 +38,7 @@ _B32 = re.compile(r"^[a-z2-7]+$")
 # What Zeek can write into these fields. Anything else is not copied.
 PROTOCOLS = ("tcp", "udp", "icmp", "unknown_transport")
 CONN_STATES = ("S0", "S1", "SF", "REJ", "S2", "S3", "RSTO", "RSTR", "RSTOS0", "RSTRH", "SH", "SHR", "OTH")
-HISTORY_LETTERS = "ShADFRCGTWIQXZ"            # and their lower case forms, and ^
+HISTORY_LETTERS = "SHADFRCGTWIQX"             # and their lower case forms, and ^ (Zeek: base/protocols/conn/main.zeek)
 SERVICES = frozenset("""dns ssl dtls quic http ftp ftp-data ssh smtp pop3 imap irc irc-data dhcp ntp snmp smb
     dce_rpc gssapi krb krb_tcp ntlm rdp rfb sip syslog ldap ldap_tcp ldap_udp mysql postgresql modbus dnp3 mqtt
     radius socks teredo ayiya gtpv1 vxlan geneve xmpp websocket ncp tftp netbios redis ssdp mdns""".split())
@@ -132,6 +132,14 @@ def public_nets(local_nets):
                           if d.version == ipaddress.ip_network(n, strict=False).version))
 
 
+def nets_within(nets, allowed):
+    """True if every network of the first list lies inside a network of the second: a list from the key
+    stick can then only narrow the list of the configuration."""
+    allowed = [ipaddress.ip_network(a, strict=False) for a in allowed]
+    return all(any(n.version == a.version and n.subnet_of(a) for a in allowed)
+               for n in (ipaddress.ip_network(x, strict=False) for x in nets))
+
+
 class Scope:
     """Decides whether an address is local, remote, multicast or broadcast."""
 
@@ -153,9 +161,9 @@ class Scope:
 
         An address outside the configured local networks is remote, whatever MAC address the frame
         carries: a frame on its way to the internet carries the MAC address of a router, and a
-        router is not always known as one. The exception is an address that the devices themselves
-        place on the local link (on_link: seen in ARP or IPv6 neighbour discovery). This covers sites
-        that use public IPv4 space or global IPv6 addresses inside.
+        router is not always known as one. The one exception is decided by the caller (on_link, see
+        transform): the frame carries the very MAC address that answers for the address on the
+        mirrored network. This covers sites that use public IPv4 space or global IPv6 addresses inside.
         """
         a = _ip(ip)
         if a.is_multicast:
@@ -349,6 +357,23 @@ def _int(v, default=0):
         return default
 
 
+def read_history(text):
+    """Zeek's history letters, each in the final direction of the record.
+
+    A capital letter is a packet of the originator, a small one of the responder. Zeek turns a record round
+    when it learns that the other side opened the connection (it saw the SYN-ACK before the SYN) and marks
+    the place with '^'. The letters before the mark keep the case of the old direction, so they are turned
+    here: 'Hs^R' (a SYN-ACK, the SYN of the other side, the turn, a reset) is read as 'hS^R'. A record that
+    Zeek turned before its first letter ('^d') reads the same.
+    """
+    if not isinstance(text, str):
+        return text
+    out = ""
+    for c in text:
+        out = (out.swapcase() if c == "^" else out) + c
+    return out
+
+
 def established(rec: dict, is_open: bool = False) -> bool:
     """True if the responder took part in the connection.
 
@@ -362,7 +387,7 @@ def established(rec: dict, is_open: bool = False) -> bool:
         # packets only: the bytes of a report include those of a packet that is held back for the next report
         answered = _int(rec.get("resp_pkts")) > 0
     if rec.get("proto") == "tcp":
-        took_part = any(c in "hadf" for c in str(rec.get("history") or ""))
+        took_part = any(c in "hadf" for c in str(read_history(rec.get("history")) or ""))
         return took_part and (answered or not is_open)
     return answered
 
@@ -394,11 +419,20 @@ def transform(rec: dict, pz: Pseudonymiser, scope: Scope, gateways: set, wan_tok
             raise ValueError("time")
 
         def side_scope(ip, mac):
-            found = scope.of(ip, mac)
-            if found == "wan" and neigh is not None and neigh.at(ip, ts):
-                return "lan"                    # an address outside the local networks, but on the local link
-            return found
+            # An address outside the local networks is a device of the site only on the evidence of this
+            # very frame: it carries the MAC address that answers for the address on the mirrored network,
+            # and that MAC address is not a router. An entry in the neighbour table alone names nobody. A
+            # remote host reaches the capture port through a router, whatever the table (which is kept on
+            # the key stick, and which any device can add to with an ARP frame) says about its address.
+            m = norm_mac(mac) if mac and not is_group_mac(mac) else None
+            return scope.of(ip, mac, on_link=bool(m and neigh is not None and m not in gateways
+                                                  and neigh.at(ip, ts) == m))
         os_, rs_ = side_scope(oh, omac), side_scope(rh, rmac)
+        if os_ in ("mcast", "bcast") and rs_ == "lan":
+            # A group address never sends. Zeek has turned the record around (a datagram that left one of
+            # its "likely server ports" for a group): the sender is the device it calls the responder.
+            rec = _turned(rec)
+            oh, rh, omac, rmac, os_, rs_ = rh, oh, rmac, omac, rs_, os_
     except (KeyError, ValueError, TypeError, AttributeError, OverflowError):
         return None, "malformed"
     if os_ in ("mcast", "bcast"):
@@ -412,7 +446,7 @@ def transform(rec: dict, pz: Pseudonymiser, scope: Scope, gateways: set, wan_tok
     out = {"ts": int(ts), "dur": round(dur, 3),
            "proto": proto, "op": op, "rp": rp, "os": os_, "rs": rs_,
            "st": rec.get("conn_state") if rec.get("conn_state") in CONN_STATES else "",
-           "hist": _word(rec.get("history"), 32, _HIST), "svc": _services(rec.get("service")),
+           "hist": _word(read_history(rec.get("history")), 32, _HIST), "svc": _services(rec.get("service")),
            "ob": _count(rec.get("orig_bytes")), "rb": _count(rec.get("resp_bytes")),
            "opk": _count(rec.get("orig_pkts")), "rpk": _count(rec.get("resp_pkts")),
            "est": established(rec, is_open), "vlan": _ranged(rec.get("vlan"), 0, 4095), "if": iface, "ib": "",
@@ -449,6 +483,17 @@ def transform(rec: dict, pz: Pseudonymiser, scope: Scope, gateways: set, wan_tok
     return out, None
 
 
+def _turned(rec):
+    """The same record with its two ends exchanged."""
+    out = dict(rec)
+    for a, b in (("id.orig_h", "id.resp_h"), ("id.orig_p", "id.resp_p"), ("orig_l2_addr", "resp_l2_addr"),
+                 ("orig_bytes", "resp_bytes"), ("orig_pkts", "resp_pkts")):
+        out[a], out[b] = rec.get(b), rec.get(a)
+    if isinstance(rec.get("history"), str):
+        out["history"] = rec["history"].replace("^", "").swapcase()
+    return out
+
+
 def _ranged(v, lo, hi, default=-1):
     v = _int(v, default) if not isinstance(v, bool) else default
     return v if lo <= v <= hi else default
@@ -463,9 +508,13 @@ def _count(v):
 
 
 def _services(v):
-    """Zeek's service names, comma separated. A name Zeek does not have is left out."""
-    names = [x for x in str(v or "").split(",") if x in SERVICES]
-    return ",".join(names)[:24] if names else ""
+    """Zeek's service names, comma separated. A name Zeek does not have is left out, and so is a name
+    that no longer fits into 24 characters: half a name would not be a name."""
+    out = ""
+    for x in str(v or "").split(","):
+        if x in SERVICES and x not in out.split(",") and len(out) + len(x) + bool(out) <= 24:
+            out += ("," if out else "") + x
+    return out
 
 
 def _word(v, maxlen, charset=r"[A-Za-z0-9]"):

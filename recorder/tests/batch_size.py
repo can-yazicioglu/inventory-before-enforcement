@@ -37,7 +37,7 @@ def one(zdir, work, copies):
     os.makedirs(os.path.join(cfg["raw_dir"], "eth1"))
     pipeline.init_key(cfg["key_dir"])
     with open(os.path.join(cfg["key_dir"], "armed.json"), "w") as f:
-        json.dump({"approval_ref": "batch size test"}, f)
+        json.dump({"approval_ref": "batch size test 1"}, f)
     t0 = min(r["ts"] for r in logs["conn"])
     span = max(r["ts"] for r in logs["conn"] + logs["open_conn"]) - t0
     for k in range(copies):                     # the whole capture squeezed into the hour before NOW, N times

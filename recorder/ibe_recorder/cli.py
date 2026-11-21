@@ -27,6 +27,11 @@ def cmd_run(cfg, args):
     print(st["state"], "| recording days:", st.get("recording_days", 0), "| records:", st.get("records_out", 0))
 
 
+def cmd_failed(cfg, args):
+    """Called by the fail-safe unit after it has stopped capture and emptied the RAM disk."""
+    print(pipeline.mark_failed(cfg)["state"])
+
+
 def cmd_status(cfg, args):
     path = os.path.join(cfg["state_dir"], "status.json")
     if not os.path.exists(path):
@@ -61,8 +66,8 @@ def cmd_arm(cfg, args):
         sys.exit("no key on the key stick: run init-key first")
     if os.path.exists(os.path.join(cfg["state_dir"], "STOP")):
         sys.exit("the recording limit was reached: use 'extend' with the site's written approval")
-    if len(args.approval_ref.strip()) < 3:
-        sys.exit("the approval reference is too short: give its date and number")
+    if not pipeline.approval_ref_ok(args.approval_ref):
+        sys.exit("this is not an approval reference: give the date and number of the ethics approval")
     with open(os.path.join(cfg["key_dir"], "armed.json"), "w", encoding="utf-8") as f:
         json.dump({"approval_ref": args.approval_ref, "armed_at": datetime.datetime.now().isoformat()}, f)
     print("armed. Capture starts when the ibe-zeek services are started.")
@@ -89,8 +94,8 @@ def cmd_extend(cfg, args):
         data = json.load(f)
     if int(args.days) < 1:
         sys.exit("the limit must be at least one day")
-    if len(args.approval_ref.strip()) < 3:
-        sys.exit("the approval reference is too short: give the date and number of the site's letter")
+    if not pipeline.approval_ref_ok(args.approval_ref):
+        sys.exit("this is not an approval reference: give the date and number of the site's letter")
     data["max_recording_days"] = int(args.days)
     entry = {"days": int(args.days), "approval_ref": args.approval_ref, "at": datetime.datetime.now().isoformat()}
     if args.calendar_days is not None:
@@ -136,6 +141,7 @@ def main(argv=None):
     ap.add_argument("--config", default="/etc/ibe/config.json")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("run").set_defaults(fn=cmd_run)
+    sub.add_parser("failed").set_defaults(fn=cmd_failed)
     sub.add_parser("status").set_defaults(fn=cmd_status)
     sub.add_parser("init-key").set_defaults(fn=cmd_init_key)
     a = sub.add_parser("arm")

@@ -1060,10 +1060,12 @@ class PipelineTests(unittest.TestCase):
         path = os.path.join(self.tmp.name, "config.json")
         with open(path, "w") as f:
             json.dump({k: v for k, v in self.cfg.items() if pipeline.DEFAULTS.get(k) != v}, f)
-        for args in (["arm", "--approval-ref", ""], ["arm", "--approval-ref", "  "], ["extend", "--days", "9999", "--approval-ref", "x"]):
+        for args in (["arm", "--approval-ref", ""], ["arm", "--approval-ref", "  "], ["extend", "--days", "9999", "--approval-ref", "x"],
+                     ["arm", "--approval-ref", "<date and number>"], ["arm", "--approval-ref", "approved"],
+                     ["extend", "--days", "9999", "--approval-ref", "<date and number>"]):
             with self.assertRaises(SystemExit) as e:
                 cli.main(["--config", path] + args)
-            self.assertIn("too short", str(e.exception))
+            self.assertIn("not an approval reference", str(e.exception))
         self.assertFalse(os.path.exists(os.path.join(self.cfg["key_dir"], "armed.json")))
         with open(path) as f:
             self.assertNotIn("extensions", json.load(f))
@@ -1518,6 +1520,358 @@ class PipelineTests(unittest.TestCase):
         for other in ((0, dict(a, ts=a["ts"] + 1)), (1, dict(a, ts=a["ts"] + 2.5)), (1, dict(a, _open=True))):
             self.assertEqual(pipeline.dedup([(0, a), other], 2)[1], 0, other)
         self.assertEqual(pipeline.dedup([(0, a), (1, dict(a, ts=a["ts"] + 1.9))], 2)[1], 1)
+
+
+class ThirdReviewTests(unittest.TestCase):
+    """One test for every finding of the third round of the two reviews (21 November 2026)."""
+    setUp, tearDown = PipelineTests.setUp, PipelineTests.tearDown
+    link, arm, write, read, outputs = (PipelineTests.link, PipelineTests.arm, PipelineTests.write, PipelineTests.read,
+                                       PipelineTests.outputs)
+
+    # ---- who is local
+
+    def test_neighbour_table_alone_names_no_remote_host(self):
+        """An entry in the neighbour table says that a MAC address answers for an address. Anybody on the network
+        can send such a claim, and the table is a file on the key stick. A remote host stays remote: its frames
+        reach the capture port through a router, and only the frame itself counts."""
+        claims = neighbours(*[(T0, f"52.1.2.{k}", f"aa:bb:cc:00:09:{k:02x}") for k in range(1, 5)],
+                            (T0, "2a02:ff0::7", "aa:bb:cc:00:09:07"))
+        for gws in ((core.norm_mac(GW),), ()):                    # the router listed, and not known as one
+            for addr in ("52.1.2.1", "52.1.2.4", "2a02:ff0::7"):
+                me = "192.168.1.10" if "." in addr else "fe80::1"
+                rec, _ = tr(conn(me, addr, DEV1, GW), neigh=claims, gateways=gws)
+                self.assertEqual((rec["rs"], rec["r"], rec["ib"]), ("wan", "wan", ""), (addr, gws))
+                rec, _ = tr(conn(addr, me, GW, DEV1), neigh=claims, gateways=gws)          # a connection from outside
+                self.assertEqual((rec["os"], rec["o"]), ("wan", "wan"), (addr, gws))
+        # the table names the router itself as the owner of a remote address (proxy ARP, or a forged entry)
+        rec, _ = tr(conn("192.168.1.10", "52.1.2.3", DEV1, GW), neigh=neighbours((T0, "52.1.2.3", GW)))
+        self.assertEqual((rec["rs"], rec["r"]), ("wan", "wan"))
+        # a device that really uses such an address: its own frames carry the MAC address that answers for it
+        rec, _ = tr(conn("192.168.1.10", "52.1.2.1", DEV1, "aa:bb:cc:00:09:01"), neigh=claims)
+        self.assertEqual((rec["rs"], rec["r"]), ("lan", PZ.device("aa:bb:cc:00:09:01")))
+
+    def test_forged_neighbours_on_the_stick_and_on_the_wire(self):
+        self.arm()
+        remote = [f"52.{k}.2.3" for k in range(1, 21)]
+        with open(os.path.join(self.cfg["key_dir"], "neighbours.json"), "w") as f:      # entries written by hand
+            json.dump({ip: [[f"aabbcc0009{k:02x}", T0 - 99.0, T0 - 9.0]] for k, ip in enumerate(remote[:10])}, f)
+        self.write("eth1", "neigh", [{"ts": T0 + 0.1, "ip": ip, "mac": f"aa:bb:cc:00:0a:{k:02x}"}      # claims on the wire
+                                     for k, ip in enumerate(remote[10:])])
+        self.write("eth1", "conn", [conn("192.168.1.10", ip, DEV1, GW, ts=T0 + 1.0 + k) for k, ip in enumerate(remote)])
+        st = pipeline.run_once(dict(self.cfg, gateway_macs=[]), now=NOW)             # and the router is not listed
+        self.assertEqual({(r["rs"], r["r"]) for r in self.outputs()}, {("wan", "wan")})
+        self.assertEqual(st["gateways"], [PZ.device(GW)])            # the claims do not hide the router either
+        self.assertEqual(len([w for w in st["warnings"] if "addresses on the local link are outside" in w]), 1)
+
+    def test_site_file_cannot_widen_a_narrowed_list(self):
+        self.arm()
+        cfg = dict(self.cfg, local_nets=["192.168.1.0/24"])       # narrowed before shipping
+        with open(os.path.join(self.cfg["key_dir"], "site.json"), "w") as f:
+            json.dump({"local_nets": ["192.168.1.0/24", "10.0.0.0/8"]}, f)
+        self.write("eth1", "conn", [conn("192.168.1.10", "10.1.2.3", DEV1, GW)])
+        st = pipeline.run_once(cfg, now=NOW)
+        self.assertIn("site.json: local_nets ignored, " + pipeline.NOT_PRIVATE, st["warnings"])
+        self.assertEqual((self.outputs()[-1]["rs"], self.outputs()[-1]["r"]), ("wan", "wan"))
+        with open(os.path.join(self.cfg["key_dir"], "site.json"), "w") as f:      # a part of the configured network
+            json.dump({"local_nets": ["192.168.1.0/25"]}, f)
+        self.write("eth1", "conn", [conn("192.168.1.10", "192.168.1.200", DEV1, GW, ts=T0 + 9.0)])
+        st = pipeline.run_once(cfg, now=NOW)
+        self.assertEqual((self.outputs()[-1]["r"], [w for w in st["warnings"] if "site.json" in w]), ("wan", []))
+        self.assertTrue(core.nets_within(["fd00::/8", "10.1.0.0/16"], core.DEFAULT_LOCAL_NETS))
+        self.assertFalse(core.nets_within(["10.0.0.0/8", "11.0.0.0/8"], core.DEFAULT_LOCAL_NETS))
+
+    # ---- copies from two or three capture ports
+
+    def test_reports_of_two_clock_hours_are_not_copies(self):
+        """A flow that crosses two switches and ends just after a full hour. Each port writes the report about
+        the hour before and, within two seconds, the last report. The second pair was taken for copies of the
+        first, and the heavier last report replaced the report about the hour before on every port."""
+        before = dict(conn("192.168.1.10", "192.168.1.20", DEV1, DEV2, proto="udp", rp=9999, ts=T0 + 3599.5, hist="Dd",
+                           orig_pkts=1, resp_pkts=1, duration=1.5), _open=True)
+        after = dict(before, ts=T0 + 3600.7, orig_pkts=2, resp_pkts=1, duration=2.7)
+        for order in ([(0, before), (1, dict(before, ts=before["ts"] + 4e-5)), (1, after), (0, dict(after, ts=after["ts"] + 4e-5))],
+                      [(0, before), (1, dict(before, ts=before["ts"] + 4e-5)), (2, dict(before, ts=before["ts"] + 8e-5)),
+                       (2, after), (1, dict(after, ts=after["ts"] + 4e-5)), (0, dict(after, ts=after["ts"] + 8e-5))]):
+            out, dropped = pipeline.dedup(order, 2.0)
+            self.assertEqual(sorted(r["orig_pkts"] for _, r in out), [1, 2], len(order))
+            self.assertEqual(dropped, len(order) - 2)
+        # the same ports used again within the window: each port has given its copy of the first connection
+        first = conn("192.168.1.10", "192.168.1.20", DEV1, DEV2, proto="udp", rp=161, ts=T0 + 1.0, hist="Dd", orig_pkts=1)
+        again = dict(first, ts=T0 + 1.9)
+        out, dropped = pipeline.dedup([(0, first), (1, dict(first, ts=T0 + 1.00004, orig_pkts=2)), (0, again),
+                                       (1, dict(again, ts=T0 + 1.90004))], 2.0)
+        self.assertEqual((len(out), dropped), (2, 2))
+
+    def test_copies_of_two_connections_with_the_same_ports_find_their_own_record(self):
+        """The same addresses and ports twice within the window (a retry, a stray packet and then the real
+        connection). The frames reach the second port a little later than the first."""
+        long = conn("192.168.1.10", "192.168.1.20", DEV1, DEV2, proto="udp", rp=161, ts=T0 + 1.0, hist="Dd", orig_pkts=10)
+        short = dict(long, ts=T0 + 1.002, hist="D", orig_pkts=1)
+        # closer together than the ports are apart: both records of port 0 come before both of port 1
+        for order in ([(0, long), (0, short), (1, dict(long, ts=T0 + 1.004)), (1, dict(short, ts=T0 + 1.006))],
+                      [(0, short), (0, dict(long, ts=T0 + 1.003)), (1, dict(short, ts=T0 + 1.006)), (1, dict(long, ts=T0 + 1.007))],
+                      [(0, long), (0, short), (1, dict(long, ts=T0 + 1.004)), (1, dict(short, ts=T0 + 1.006)),
+                       (2, dict(long, ts=T0 + 1.008)), (2, dict(short, ts=T0 + 1.010))]):
+            out, dropped = pipeline.dedup(order, 2.0)
+            self.assertEqual((sorted(r["orig_pkts"] for _, r in out), dropped), ([1, 10], len(order) - 2))
+        # a port that did not see the first of the two: its record is the copy of the second, not of the first
+        out, dropped = pipeline.dedup([(0, short), (0, dict(long, ts=T0 + 1.5)), (1, dict(long, ts=T0 + 1.5004))], 2.0)
+        self.assertEqual((sorted(r["orig_pkts"] for _, r in out), dropped), ([1, 10], 1))
+        # every datagram from the unspecified address is a record of its own: three in a row from one device
+        ask = conn("0.0.0.0", "255.255.255.255", DEV1, "ff:ff:ff:ff:ff:ff", proto="udp", op=68, rp=67, ts=T0 + 1.0, hist="D")
+        three = [(n, dict(ask, ts=T0 + 1.0 + 0.002 * i + 0.004 * n)) for n in (0, 1) for i in range(3)]
+        self.assertEqual([len(x) if isinstance(x, list) else x for x in pipeline.dedup(three, 2.0)], [3, 3])
+
+    def test_letters_before_zeek_turned_a_record_are_read_the_other_way_round(self):
+        """The capture shows the SYN-ACK of a server before the SYN it answers (a lost or late first frame).
+        Zeek turns the record round when the SYN comes and marks the place. The letters before the mark keep
+        the case of the old direction: the server's SYN-ACK stood as a packet of the client, and a server that
+        sent nothing else had not taken part."""
+        for told, read in (("Hs^R", "hS^R"), ("Hs^ADdFf", "hS^ADdFf"), ("^hADadFf", "^hADadFf"), ("^d", "^d"), ("H", "H"),
+                           ("ShADadFf", "ShADadFf"), ("^Hs^D", "^hS^D"), ("", "")):
+            self.assertEqual(core.read_history(told), read)
+        self.assertIsNone(core.read_history(None))
+        scan = conn("192.168.1.10", "192.168.1.20", DEV1, DEV2, op=50000, rp=22, hist="Hs^R", conn_state="RSTO",
+                    orig_pkts=2, resp_pkts=1)
+        rec, why = tr(scan)
+        self.assertEqual((why, rec["hist"], rec["est"]), (None, "hS^R", True))
+        late = conn("192.168.1.20", "192.168.1.10", DEV2, DEV1, op=9100, rp=50050, hist="H", conn_state="OTH",
+                    orig_pkts=3, resp_pkts=0)
+        rec, why = tr(late)                                   # not turned: the letter stays, nobody answered it
+        self.assertEqual((why, rec["hist"], rec["est"]), (None, "H", False))
+
+    def test_record_written_the_other_way_round_by_one_port_is_a_copy(self):
+        """Port 1 did not get the question, so its record begins with the answer and names the printer as the
+        device that opened the flow. It is a copy of the record of port 0, which began earlier."""
+        asked = conn("192.168.1.10", "192.168.1.20", DEV1, DEV2, proto="udp", op=50000, rp=161, ts=T0 + 5.0, hist="Dd",
+                     orig_pkts=1, resp_pkts=1)
+        turned = conn("192.168.1.20", "192.168.1.10", DEV2, DEV1, proto="udp", op=161, rp=50000, ts=T0 + 5.004, hist="D",
+                      orig_pkts=1, resp_pkts=0, conn_state="S0")
+        for order in ([(0, asked), (1, turned)], [(1, turned), (0, asked)], [(0, asked), (1, turned), (2, dict(asked, ts=T0 + 5.00008))]):
+            out, dropped = pipeline.dedup(order, 2.0)
+            self.assertEqual([(r["id.orig_h"], r["id.resp_p"]) for _, r in out], [("192.168.1.10", 161)])
+            self.assertEqual(dropped, len(order) - 1)
+        # reports: the time is that of the last packet, the beginning follows from the age of the connection
+        whole = dict(asked, _open=True, ts=T0 + 100.0, duration=95.0)
+        late = dict(turned, _open=True, ts=T0 + 99.9, duration=94.896)
+        out, dropped = pipeline.dedup([(1, late), (0, whole)], 2.0)
+        self.assertEqual(([(r["id.orig_h"], r["id.resp_p"]) for _, r in out], dropped), ([("192.168.1.10", 161)], 1))
+        # the same port twice, or more than the window apart: two records
+        self.assertEqual(len(pipeline.dedup([(0, asked), (0, turned)], 2.0)[0]), 2)
+        self.assertEqual(len(pipeline.dedup([(0, asked), (1, dict(turned, ts=T0 + 9.0))], 2.0)[0]), 2)
+
+    # ---- what Zeek writes
+
+    @unittest.skipUnless(os.path.exists("/opt/zeek/share/zeek/base/protocols/conn/main.zeek"), "needs Zeek's scripts")
+    def test_history_letters_are_those_of_zeek(self):
+        import re
+        with open("/opt/zeek/share/zeek/base/protocols/conn/main.zeek", encoding="utf-8") as f:
+            letters = re.findall(r"^\s*##\s+(\S)\s{3,}\S", f.read(), re.M)
+        letters = [c for c in letters if c != "^" and len(c) == 1 and c.islower()]
+        self.assertGreaterEqual(len(letters), 13)
+        self.assertEqual(sorted(core.HISTORY_LETTERS.lower()), sorted(set(letters)))
+
+    def test_history_of_a_late_syn_ack_is_kept(self):
+        """The first packet seen is a SYN-ACK (the client has given up): Zeek writes H, or Hr if the client's
+        system resets. The letter was missing from the list and the whole history was written empty."""
+        for hist in ("H", "Hr", "ShADadFf", "^hdf", "SHADFRCGTWIQXshadfrcgtwiqx"):
+            rec, _ = tr(conn("192.168.1.20", "192.168.1.10", DEV2, DEV1, op=9100, rp=50050, hist=hist))
+            self.assertEqual(rec["hist"], hist)
+        self.arm()
+        self.write("eth1", "conn", [conn("192.168.1.10", "192.168.1.20", DEV1, DEV2, hist="SZ"),
+                                    conn("192.168.1.10", "192.168.1.20", DEV1, DEV2, op=50001, ts=T0 + 9.0)])
+        st = pipeline.run_once(self.cfg, now=NOW)
+        self.assertEqual([r["hist"] for r in self.outputs()], ["", "ShADadFf"])
+        self.assertEqual(st["history_unknown"], 1)
+        self.assertEqual(len([w for w in st["warnings"] if w.startswith("1 records had a connection history")]), 1)
+
+    def test_record_that_zeek_turned_around_towards_a_group(self):
+        """A group address never sends. A datagram from one of Zeek's likely server ports to a group comes
+        out with the group as originator: it is turned back, and the sender keeps its flow."""
+        rec, why = tr(conn("239.255.255.250", "192.168.1.10", "01:00:5e:7f:ff:fa", DEV1, op=1900, rp=137, proto="udp",
+                           hist="^d", orig_pkts=0, resp_pkts=2, orig_bytes=0, resp_bytes=90))
+        self.assertIsNone(why)
+        self.assertEqual((rec["o"], rec["os"], rec["rs"], rec["op"], rec["rp"], rec["opk"], rec["rpk"], rec["ob"], rec["hist"],
+                          rec["est"]), (PZ.device(DEV1), "lan", "mcast", 137, 1900, 2, 0, 90, "D", False))
+        self.assertTrue(rec["r"].startswith("mcast:"))
+        rec, why = tr(conn("192.168.1.255", "192.168.1.10", "ff:ff:ff:ff:ff:ff", DEV1, op=8888, rp=53, proto="udp", hist="^d"))
+        self.assertEqual((rec["o"], rec["r"]), (PZ.device(DEV1), "bcast"))
+        # a group as the source and no device of the site at the other end: nothing to keep
+        self.assertEqual(tr(conn("239.255.255.250", "52.1.2.3", "01:00:5e:7f:ff:fa", GW, proto="udp")), (None, "group_source"))
+
+    def test_long_service_list_is_cut_between_names(self):
+        self.assertEqual(core._services("dce_rpc,gssapi,ntlm,smb,krb"), "dce_rpc,gssapi,ntlm,smb")
+        self.assertEqual(core._services("krb_tcp,gssapi,dce_rpc,smb,ntlm"), "krb_tcp,gssapi,dce_rpc")
+        self.assertEqual(core._services("ssl,ssl,evil.example.com,dns"), "ssl,dns")
+        rec, _ = tr(conn("192.168.1.10", "192.168.1.20", DEV1, DEV2, service="dce_rpc,gssapi,ntlm,smb,krb"))
+        self.assertIsNone(core.leak_check(rec, {"other", "unknown"}))
+
+    # ---- labels typed at the site
+
+    def test_host_names_and_odd_address_shapes_in_labels(self):
+        self.arm()
+        self.write("eth1", "dns", [
+            {"id.resp_p": 137, "query": "MUAYENE-PC03"}, {"id.resp_p": 5355, "query": "kasa2"},
+            {"id.resp_p": 5353, "query": "sekreter.local"}, {"id.resp_p": 137, "query": "WORKGROUP"},
+            {"id.resp_p": 5353, "query": "HP LaserJet M404dn._ipp._tcp.local"},          # a service, not a computer
+            {"id.resp_p": 53, "query": "oct-arsiv.klinik.example", "answers": ["192.168.1.9"]},
+            {"id.resp_p": 53, "query": "update.vendor.example", "answers": ["52.1.2.3"]}])
+        refused = ["MUAYENE-PC03", "bilgisayar muayene pc03", "Sekreter", "KASA2", "oct arsiv", "DESKTOP-4F2K9QA",
+                   "laptop-ab12cd34", "192. 168. 1. 20", "192..168..1..20", "192(.)168(.)1(.)20", "0xC0A80114", "C0A80114",
+                   "aa- bb- cc- 00- 00- 01", "aa__bb__cc__00__00__01"]
+        kept = ["LaserJet M404dn", "DS-2CD2143G0-I", "OptiPlex 7090", "T46S", "Solix", "ProLiant DL380 Gen10", "FortiGate 40F",
+                "2530-24G (J9776A)", "update server", "Sekreter yazicisi"]
+        with open(os.path.join(self.cfg["key_dir"], "devices.csv"), "w") as f:
+            f.write("mac,ip,type,brand,model,group,visibility,switch\n")
+            for i, model in enumerate(refused + kept):
+                f.write(f"aa:bb:cc:00:02:{i:02x},,pc,HP,{model},general,full,A\n")
+        self.write("eth1", "conn", [conn("192.168.1.10", "192.168.1.20", DEV1, DEV2)])
+        st = pipeline.run_once(self.cfg, now=NOW)
+        labels = json.loads(self.read(self.cfg["data_dirs"][0], "devices.json"))
+        got = [labels[PZ.device(f"aa:bb:cc:00:02:{i:02x}")]["model"] for i in range(len(refused + kept))]
+        self.assertEqual(got, [""] * len(refused) + kept)
+        self.assertEqual(st["devices_in_table"], len(refused + kept))
+        seen = json.loads(self.read(self.cfg["key_dir"], "names_seen.json"))          # stays on the key stick
+        self.assertEqual(seen, {"muayenepc03": True, "kasa2": True, "sekreter": False, "workgroup": False, "octarsiv": True})
+        for d in self.cfg["data_dirs"]:
+            for n in os.listdir(d):
+                text = self.read(d, n).lower()
+                for name in ("muayene", "kasa2", "sekreter\"", "arsiv", "4f2k9qa"):
+                    self.assertNotIn(name, text, n)
+        # a damaged or forged list on the stick can only refuse more
+        with open(os.path.join(self.cfg["key_dir"], "names_seen.json"), "w") as f:
+            f.write('{"x": 1, "laserjet": true, "' + "a" * 99 + '": true, "Bad Name": true, "solix": []}')
+        self.assertEqual(pipeline.load_names(os.path.join(self.cfg["key_dir"], "names_seen.json")), {"laserjet": True, "solix": False})
+        with mock.patch.object(pipeline, "MAX_NAMES_SEEN", 2):         # a full list is said, it does not grow
+            self.write("eth1", "dns", [{"id.resp_p": 5355, "query": f"made-up-{k}"} for k in range(9)])
+            st = pipeline.run_once(self.cfg, now=NOW + 3600)
+        self.assertEqual(len(json.loads(self.read(self.cfg["key_dir"], "names_seen.json"))), 2)
+        self.assertEqual(len([w for w in st["warnings"] if w.startswith("the list of computer names")]), 1)
+
+    # ---- the device's own state
+
+    def test_state_file_with_values_of_the_wrong_type(self):
+        """The state file is valid JSON but one entry has another type. The run goes on with a fresh entry.
+        Before, such a file ended every run (and with it capture) or wrote nothing, hour after hour."""
+        self.arm()
+        self.write("eth1", "conn", [conn("192.168.1.10", "192.168.1.20", DEV1, DEV2)])
+        self.assertEqual(pipeline.run_once(self.cfg, now=NOW)["records_out"], 1)
+        path = os.path.join(self.cfg["state_dir"], "status.json")
+        good = json.loads(self.read(path))
+        bad = {"last_run": "yesterday", "links": [1, 2], "errors": {"a": 1}, "export_encrypted": "x", "records_dropped": [],
+               "records_out": None, "records_open": "x", "files": "12", "days": {"2026-12-29": 1}, "clock_ref": {"a": 1},
+               "clock_jumps": 5, "key_changes": "x", "devices_seen": [[1]], "key_id": 5, "quality_last": 5, "neighbours": "x",
+               "warnings": 5, "state": 5, "gateways": [5], "device_table_problems": "x", "history_unknown": []}
+        for k, (key, value) in enumerate(sorted(bad.items()), 1):
+            with open(path, "w") as f:
+                json.dump(dict(good, **{key: value}), f)
+            self.write("eth1", "conn", [conn("192.168.1.10", "192.168.1.20", DEV1, DEV2, ts=T0 + 3600.0 * k + 5)])
+            st = pipeline.run_once(dict(self.cfg, raise_errors=False), now=NOW + 3600 * k)
+            self.assertEqual((st["state"], st["errors"], len(self.outputs())), ("ok", [], k + 1), key)
+            good = json.loads(self.read(path))
+        self.assertEqual(good["days"], ["2026-12-29", "2026-12-30"])
+        # foreign entries do not travel into the copies of the status
+        with open(path, "w") as f:
+            json.dump(dict(good, note="oda 3 dr ahmet", errors=[{"t": 1, "e": "x", "more": "y"}]), f)
+        st = pipeline.run_once(self.cfg, now=NOW + 3600 * 30)
+        self.assertNotIn("note", st)
+        self.assertEqual(st["errors"], [])
+
+    def test_failed_job_is_said_in_status_and_light(self):
+        """The hourly job was ended by the system. The fail-safe unit stops capture and empties the RAM disk.
+        Its last command writes that into the status, which would otherwise go on saying 'ok'."""
+        from ibe_recorder import cli
+        led = os.path.join(self.tmp.name, "led")
+        os.makedirs(led)
+        cfg = dict(self.cfg, led=led)
+        self.arm()
+        self.write("eth1", "conn", [conn("192.168.1.10", "192.168.1.20", DEV1, DEV2)])
+        self.assertEqual(pipeline.run_once(cfg, now=NOW)["state"], "ok")
+        self.assertEqual(self.read(led, "trigger"), "heartbeat")
+        self.write("eth1", "conn", [conn("192.168.1.10", "192.168.1.20", DEV1, DEV2, ts=T0 + 3700.0)])
+        path = os.path.join(self.tmp.name, "config.json")
+        with open(path, "w") as f:
+            json.dump({k: v for k, v in cfg.items() if pipeline.DEFAULTS.get(k) != v}, f)
+        with mock.patch("builtins.print"):
+            cli.main(["--config", path, "failed"])
+        for where in (self.cfg["state_dir"], self.cfg["key_dir"], self.cfg["data_dirs"][0], self.cfg["data_dirs"][1]):
+            st = json.loads(self.read(where, "status.json"))
+            self.assertEqual(st["state"], "stopped: " + pipeline.FAILED, where)
+            self.assertEqual((st["days"], st["files"], st["records_out"]), (["2026-12-29"], 1, 1))
+        self.assertEqual(self.read(led, "trigger"), "timer")
+        self.assertEqual(os.listdir(os.path.join(self.cfg["raw_dir"], "eth1")), [])      # nothing raw is left either
+        self.write("eth1", "conn", [conn("192.168.1.10", "192.168.1.20", DEV1, DEV2, ts=T0 + 7300.0)])
+        st = pipeline.run_once(cfg, now=NOW + 7200)                                      # the next run that succeeds
+        self.assertEqual((st["state"], st["records_out"], st["errors"][-1]["e"]),
+                         ("ok", 2, "the hourly job failed or was ended, the hour was not written"))
+        # also with a configuration that cannot be used
+        self.assertTrue(pipeline.mark_failed({"raw_dir": 5, "state_dir": self.cfg["state_dir"]})["state"].startswith("stopped"))
+
+    def test_checks_at_the_same_moment_do_not_refuse_each_other(self):
+        import threading
+        results = []
+
+        def many():
+            results.extend(pipeline.state_writable(self.cfg["state_dir"]) for _ in range(300))
+        threads = [threading.Thread(target=many) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual((len(results), all(results)), (900, True))
+        self.assertEqual([n for n in os.listdir(self.cfg["state_dir"]) if n.startswith(".write-test")], [])
+        self.assertFalse(pipeline.state_writable(os.path.join(self.cfg["key_dir"], "hmac.key", "x")))
+
+    def test_placeholder_of_the_instructions_does_not_arm(self):
+        for text in ('{"approval_ref": "<date and number>"}', '{"approval_ref": "approved"}', '{"approval_ref": 20261205}'):
+            self.arm(text)
+            self.write("eth1", "conn", [conn("192.168.1.10", "192.168.1.20", DEV1, DEV2)])
+            st = pipeline.run_once(self.cfg, now=NOW)
+            self.assertEqual((st["state"], self.outputs()), ("ready, not recording (not armed)", []), text)
+            self.assertIn("armed.json is on the key stick but holds no usable approval reference", st["warnings"])
+        self.arm('{"approval_ref": "05.12.2026 / 2026-12-05"}')
+        self.assertIsNone(pipeline.preflight(self.cfg, NOW))
+
+    def test_nothing_is_written_after_the_limit_under_a_clock_set_back(self):
+        self.arm()
+        cfg = dict(self.cfg, max_recording_days=2)
+        for k in range(2):
+            self.write("eth1", "conn", [conn("192.168.1.10", "192.168.1.20", DEV1, DEV2, ts=T0 + k * 86400.0)])
+            self.assertEqual(pipeline.run_once(cfg, now=NOW + k * 86400)["state"], "ok")
+        # the clock now shows the first day again: these records would pass as late records of a counted day
+        self.write("eth1", "conn", [conn("192.168.1.10", "192.168.1.20", DEV1, DEV2, ts=T0 + 60.0 + k) for k in range(30)])
+        st = pipeline.run_once(cfg, now=NOW + 120)
+        self.assertEqual((st["state"], len(self.outputs()), st["files"]), ("stopped: limit of 2 recording days reached", 2, 2))
+        self.assertEqual(os.listdir(os.path.join(self.cfg["raw_dir"], "eth1")), [])
+        self.assertTrue(os.path.exists(os.path.join(cfg["state_dir"], "STOP")))
+        # set back within the last counted day: recording goes on until that day ends
+        os.remove(os.path.join(cfg["state_dir"], "STOP"))
+        cfg = dict(cfg, max_recording_days=3)
+        self.write("eth1", "conn", [conn("192.168.1.10", "192.168.1.20", DEV1, DEV2, ts=T0 + 2 * 86400.0)])
+        self.assertEqual(pipeline.run_once(cfg, now=NOW + 2 * 86400 + 7200)["state"], "ok")
+        self.write("eth1", "conn", [conn("192.168.1.10", "192.168.1.20", DEV1, DEV2, ts=T0 + 2 * 86400.0 + 99)])
+        st = pipeline.run_once(cfg, now=NOW + 2 * 86400)
+        self.assertEqual((st["state"], len(self.outputs())), ("ok", 4))
+
+    # ---- names of remote hosts in RAM
+
+    def test_remote_names_stamped_in_the_future_are_dropped(self):
+        self.arm()
+        self.write("eth1", "dns", [{"query": "portal.vendor.example", "answers": ["52.7.7.8"]}])
+        pipeline.run_once(self.cfg, now=NOW + 20 * 86400)             # the clock runs twenty days ahead
+        self.assertEqual(list(json.loads(self.read(self.cfg["raw_dir"], "ip2dom.json"))), ["52.7.7.8"])
+        pipeline.run_once(self.cfg, now=NOW)                          # and is corrected
+        self.assertEqual(json.loads(self.read(self.cfg["raw_dir"], "ip2dom.json")), {})
+
+    def test_name_of_an_address_on_the_link_is_not_kept(self):
+        """A site that uses public addresses inside: the name of its own server is not a remote name."""
+        self.arm()
+        self.write("eth1", "neigh", [{"ts": T0 + 0.1, "ip": "193.140.1.7", "mac": DEV2}])
+        self.write("eth1", "dns", [{"query": "oct-arsiv.klinik.example", "answers": ["193.140.1.7"]},
+                                   {"query": "portal.vendor.example", "answers": ["52.7.7.8"]}])
+        self.write("eth1", "ssl", [{"id.resp_h": "193.140.1.7", "server_name": "oct-arsiv.klinik.example"}])
+        pipeline.run_once(self.cfg, now=NOW)
+        self.assertEqual(list(json.loads(self.read(self.cfg["raw_dir"], "ip2dom.json"))), ["52.7.7.8"])
 
 
 if __name__ == "__main__":

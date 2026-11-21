@@ -82,9 +82,13 @@ class UnitFileTests(unittest.TestCase):
     def test_failsafe_empties_the_ram_disk_whatever_stopping_says(self):
         lines = self.unit("ibe-failsafe.service")
         runs = [x for x in lines if x.startswith("ExecStart=")]
-        self.assertEqual(len(runs), 2)
+        self.assertEqual(len(runs), 3)
         self.assertTrue(runs[0].startswith("ExecStart=-/usr/bin/systemctl stop "))        # the minus: a failure is passed over
         self.assertEqual(runs[1], "ExecStart=/usr/bin/find /run/ibe/raw -mindepth 1 -delete")
+        # the status is written last, after capture is stopped and the RAM disk is empty, and may fail
+        self.assertEqual(runs[2], "ExecStart=-/usr/bin/python3 -m ibe_recorder --config /etc/ibe/config.json failed")
+        self.assertIn("Environment=PYTHONPATH=/opt/ibe", lines)
+        self.assertIn("TimeoutStartSec=120", lines)                 # a hanging command cannot block the next start
 
 
 class InstallerTests(unittest.TestCase):
@@ -153,6 +157,29 @@ class InstallerTests(unittest.TestCase):
                      "ip link set eth1 down", "ip link set eth2 down", "rfkill block all"):
             self.assertIn(want, calls)
         self.assertFalse(any("start" in c.split() for c in calls))            # the installer starts nothing
+
+    def test_files_that_do_not_end_with_a_line_break(self):
+        """An editor that leaves the last line break out (Notepad on the boot partition). The first line the
+        installer adds was glued to the last line of the file: the root file system entry was damaged, the RAM
+        disk and the first boot setting were not in effect, and the installer reported success."""
+        for d in ("etc", "boot/firmware"):
+            os.makedirs(os.path.join(self.root, d))
+        with open(os.path.join(self.root, "etc/fstab"), "w") as f:
+            f.write("PARTUUID=1234-01  /boot/firmware  vfat  defaults  0  2\nPARTUUID=1234-02  /  ext4  defaults,noatime  0  1")
+        with open(os.path.join(self.root, "boot/firmware/config.txt"), "w") as f:
+            f.write("# config\n[all]\ncamera_auto_detect=1")
+        r = fake_install(self.root, ["eth1", "eth2"])
+        self.assertEqual(r.returncode, 0, r.stdout[-800:] + r.stderr[-800:])
+        fstab = self.read("etc/fstab").splitlines()
+        self.assertIn("PARTUUID=1234-02  /  ext4  defaults,noatime  0  1", fstab)
+        self.assertEqual(len([x for x in fstab if x.startswith("tmpfs /run/ibe tmpfs ")]), 1)
+        boot = self.read("boot/firmware/config.txt").splitlines()
+        self.assertEqual(boot[:3], ["# config", "[all]", "camera_auto_detect=1"])
+        for line in ("dtoverlay=disable-wifi", "dtoverlay=disable-bt", "dtparam=rtc_bbat_vchg=3000000", "dtparam=pciex1"):
+            self.assertEqual(boot.count(line), 1)
+        before = (self.read("etc/fstab"), self.read("boot/firmware/config.txt"))
+        fake_install(self.root, ["eth1", "eth2"])                       # and a second run adds nothing
+        self.assertEqual((self.read("etc/fstab"), self.read("boot/firmware/config.txt")), before)
 
     def test_second_run_changes_nothing(self):
         self.assertEqual(fake_install(self.root, ["eth1", "eth2"]).returncode, 0)
