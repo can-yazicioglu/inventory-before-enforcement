@@ -121,9 +121,11 @@ ARP half an hour later. The finished record of the same flow names the host by i
 
 ## Results of the tests
 
-Run on 21 November 2026 with Zeek 8.0.4 built from source on an amd64 test machine (2 cores).
-The unit tests (106 for the recorder and its installer, 17 for the analysis side) pass on Python
-3.11, 3.12 and 3.13.
+Run on 24 November 2026 with Zeek 8.0.4 built from source on an amd64 test machine (2 cores), in
+one go with `tests/final.sh`. The unit tests (112 for the recorder and its installer, 17 for the
+analysis side) pass on Python 3.11, 3.12 and 3.13. The numbers of the hand-made capture and of the
+two end-to-end runs are exactly those of 21 November (version 0.7.0), as they should be: this
+version changed only what is written about the labels of a device.
 
 `tests/scenarios.py` (a capture made by hand, 18,129 frames over 56 hours, fed to the anonymiser
 hour by hour in 55 runs, the logs that Zeek writes when it stops included, a second capture that
@@ -176,6 +178,7 @@ CICIoMT2024 (1,935,680 packets, 22.1 hours).
 | Device pseudonyms match MAC addresses one to one | 25 pseudonyms, 25 MAC addresses, 1 router learned |
 | No address, name or key in the output | 142 files searched for 974 raw strings (addresses, MAC addresses, DNS names, TLS names) and for address shapes: no hit |
 | Files with real addresses exist on the key stick only | pass |
+| Brand and model typed for the devices after the first day (one product in two spellings, the room of a person, a computer name the network never showed) | in no output file. 24 devices carry one of 3 keyed codes, the text is in `models.csv` on the key stick |
 | Without permission for tokens, remote hosts carry a service type only | pass |
 | Flow types of the analysis equal those of a second implementation of the same rules (plain Python, record by record, without the database) | 4,800 device-day-types, no difference |
 | No new flow type after the first day | pass at all five levels |
@@ -183,7 +186,8 @@ CICIoMT2024 (1,935,680 packets, 22.1 hours).
 | No alert day in the 14 days after enforcement | pass |
 
 The same test on a scan (the OS scan capture of CICIoMT2024, 38,364 packets in 218 seconds, 30,992
-connection records): every check passes, 55,950 device-day-types equal the second implementation.
+connection records): every check passes, 55,950 device-day-types equal the second implementation,
+19 devices carry one of 3 keyed codes for brand and model.
 The scanner tried 1,000 ports on each of two devices. One attempt was answered (port 22) and became
 a flow type of the scanned device, the 1,999 others did not. The scanner itself has 1,827 flow
 types, as it should. 135 rows a day come from TCP records whose handshake was not seen. Among them
@@ -196,17 +200,18 @@ the clients to port 1883 of the two brokers, also the one in which the broker sp
 |---|---|
 | Replay at 50 Mbit/s (33,234 packets per second) | 1,935,680 of 1,935,680 packets seen on each port, none dropped |
 | Replay at 200 Mbit/s (132,934 packets per second) | 1,935,680 of 1,935,680 packets seen on each port, none dropped |
-| Replay as fast as the machine allows (698 to 787 Mbit/s reached in three runs, about half a million packets per second on each port) | all packets reached each port. Capture dropped none in two runs and 74 packets of one port (0.004 percent) in the third: two Zeek processes and two replay processes share two cores here |
-| Rotation, anonymisation, duplicates across ports | 45,303 records written, 44,971 duplicates removed |
-| Connections that stay open are reported while they are open | 30,752 reports (every 10 seconds in this test) |
-| Every completed log a run finds is read and deleted, later ones are left for the next run | 76 logs read and deleted |
-| Capture killed in the middle of a log | the open log (3,304 records) was rotated at restart and anonymised on the next run |
+| Replay as fast as the machine allows (788 and 896 Mbit/s reached, more than half a million packets per second on each port) | all packets reached each port. Capture dropped 29 packets of one port and 54,852 of the other (2.8 percent). Two Zeek processes and two replay processes share two cores here, and the result changes from run to run: in seven runs on this machine (four with this version, three with the version before) a port lost between nothing and 4.5 percent. The anonymiser does not run while packets are replayed, so this loss is that of Zeek on this machine |
+| Rotation, anonymisation, duplicates across ports | 45,359 records written, 44,881 duplicates removed (these counts follow the timing of the replay and differ a little in every run) |
+| Connections that stay open are reported while they are open | 30,950 reports (every 10 seconds in this test) |
+| Every completed log a run finds is read and deleted, later ones are left for the next run | 74 logs read and deleted |
+| Capture killed in the middle of a log | the open log (3,040 records) was rotated at restart and anonymised on the next run |
 | Key removed | recording stopped, RAM emptied, capture not allowed to start again |
 
 `tests/egress_block.py`: without the rule 20 of 20 raw frames left the interface, with the rule 0 of 20.
 
-`tests/batch_size.py`: one run takes 0.50 GB of memory for 142,926 records, 2.44 GB for 714,630 and
-4.86 GB for 1,429,260, at about 10,000 records per second.
+`tests/batch_size.py`: one run takes 0.51 GB of memory for 142,926 records, 2.44 GB for 714,630 and
+4.86 GB for 1,429,260, at about 10,000 records per second (11,600 for the smallest batch, 8,900 for
+the largest).
 
 Zeek itself (measured on 19 November, the Zeek script has changed since then only in the minute
 at which it completes its logs): 86 MB for the benign capture. During a made-up port scan of 1.5 million unanswered
@@ -281,7 +286,7 @@ The recorder keeps four more files on the key stick, all with real addresses or 
 which leaves the site: `devices_observed.csv` (the devices seen so far), `gateways_seen.json` (why a
 MAC address counts as a router), `neighbours.json` (which MAC address answers for which IP address)
 and `names_seen.json` (the names by which the devices call each other). A fifth file, `models.csv`,
-holds the brands and models as they were typed, one line per product. The recorder never exports
+holds the brands and models that were typed, one line per product. The recorder never exports
 it either: its lines leave only when the IT officer has read them and sends them (step 7).
 
 Before a second recording with the same stick or disk, wipe both. They carry the day count of the
@@ -330,4 +335,4 @@ python3 -m ibe_recorder export --dest DIR                       # copy with SHA-
 - Probes that are not connection attempts have no opener, so their roles come from the port rules. An ACK scan from one source port counts as the scanner serving that port, and probes that leave no letter in Zeek's history (no flags, or SYN with FIN) give the sender nothing. Ordinary connection attempts count for the scanner as they should.
 - TCP flows that never got going (one side never spoke, or the opener sent a single packet: stray packets, a scan with ACK or FIN packets, connection attempts from made-up addresses that a server answers) are kept for a day like any silent connection, up to 50,000 of them. Beyond that they are dropped after five minutes, as Zeek does by default. A faster flood of such packets needs the memory any Zeek needs for it (about 5.6 kB per packet for five minutes).
 - The hourly batch is processed in memory (see `batch_size.py` above). A site with more than about a million connections per hour needs a shorter rotation interval. If a run fails for lack of memory, capture is stopped, the RAM disk is emptied and capture starts again after the next run, so that hour and the one before it are lost. The status and the light say so until then.
-- Brand and model text is kept out of every exported file by the program, and out of the e-mail by a person. What the IT officer overlooks in `models.csv` (the name of a room typed as a model, say) reaches the researchers with the lines of that list. The list is short for that reason: one line per product, not one per device.
+- Brand and model text is kept out of every exported file by the program. Whether a text that does not belong there (the name of a room typed as a model, say) is kept out of the e-mail depends on a person: what the IT officer overlooks in `models.csv` reaches the researchers with the lines of that list. The list is short for that reason: one line per product, not one per device.
