@@ -93,7 +93,8 @@ def unsw(flows_dir, params_dir, out):
         cand = addr_g.get((dev, day, et))
         if cand is None:
             continue
-        remaining = g; order = cand.sort_values('c', ascending=False).ip.tolist(); chosen = []
+        # ties are broken by the address, so that the result does not depend on the order in which the database returns rows
+        remaining = g; order = cand.sort_values(['c', 'ip'], ascending=[False, True]).ip.tolist(); chosen = []
         while len(remaining) and order:
             best, best_c = None, 0
             for ip in order[:20]:
@@ -114,7 +115,7 @@ def unsw(flows_dir, params_dir, out):
     con.register('a', a)
     # (day, ip) -> device name, for resolving LAN peers that are other monitored devices.
     # Keep the dominant owner of each address per day.
-    o = pd.DataFrame(own, columns=['device', 'day', 'ip', 'c']).sort_values('c', ascending=False)
+    o = pd.DataFrame(own, columns=['device', 'day', 'ip', 'c']).sort_values(['c', 'device'], ascending=[False, True])
     o = o.drop_duplicates(['day', 'ip'])
     con.register('own', o)
     # domain labels from TLS SNI and HTTP Host, per (device, peer ip)
@@ -141,7 +142,7 @@ def unsw(flows_dir, params_dir, out):
     dm = pd.DataFrame(dom_rows, columns=['device', 'ip', 'host', 'c'])
     dm['domain'] = [ext(h).top_domain_under_public_suffix or None for h in dm.host]
     dm = dm.dropna(subset=['domain']).groupby(['device', 'ip', 'domain'], as_index=False).c.sum()
-    dm = dm.sort_values('c', ascending=False).drop_duplicates(['device', 'ip'])
+    dm = dm.sort_values(['c', 'domain'], ascending=[False, True]).drop_duplicates(['device', 'ip'])
     con.register('dm', dm)
     con.execute(f"""
     CREATE TABLE o1 AS

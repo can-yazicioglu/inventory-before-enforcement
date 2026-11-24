@@ -9,10 +9,14 @@ The frozen method (`../docs/method.md`) as code. Python 3 with duckdb, pandas, n
 | 3 | `incidence3.py` | flow types per device and day at six levels of detail, role assignment, participation filter |
 | 4 | `run_series3.py`, `gtlib.py` | for every device and observation length T: Q1, Q2, new types on the following days, exchangeability test |
 | 5 | `scores.py` | Good-Turing estimate, upper bound, drift correction (GT-C) |
-| 6 | `eval_all3.py`, `extra.py`, `alertday.py`, `matched.py` | calibration, the stopping rules, alert-day metric, cluster bootstrap |
+| 6 | `eval_all3.py`, `extra.py`, `alertday.py`, `matched.py`, `capture_len.py`, `hvac_cal.py` | calibration, the stopping rules, alert-day metric, cluster bootstrap, how long a capture must be |
+| describe | `facts.py`, `exp1.py`, `exp4.py`, `exp5.py`, `exp6.py` | the descriptive numbers of the text, exchangeability test, device categories, fleet learning, sampling unit |
+| other data | `pcap2flows.py`, `cic_eval.py`, `adapt_servtrace.py` | CICIoMT2024 (device states, reconnaissance), IoT-ServTrace (port level only) |
 | check | `verify.py`, `indep.py`, `indep_unsw.py`, `prop_check.py` | brute-force recount of the inputs, a second implementation written from the method text, exact check of the propositions |
 
-Run order and time zones are recorded in `run_v3.sh`, `run_final_base.sh` and `run_val.sh`.
+Run order and time zones are recorded in `run_v3.sh`, `run_final_base.sh`, `run_val.sh` and `run_extra.sh`, in this order.
+`run_cic.sh` and `run_servtrace.sh` are independent of them. Every number quoted in the text comes from a table or a log
+that one of these scripts writes.
 Paths come from the environment variable `IBE_DATA` (default `data/`).
 
 ## Clinical sites

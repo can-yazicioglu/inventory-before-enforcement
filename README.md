@@ -24,7 +24,7 @@ rule and tests it on public traces and at clinical sites.
 2. Each device is observed per active local day. After T days, Q1(T) flow types have been seen on exactly one day.
 3. If days are exchangeable, the expected number of new flow types tomorrow is no larger than the expected value of Q1(T)/T (Good-Turing).
 4. **GT-C** adds a 95 percent margin and a drift correction: enforce on the first day T ≥ 7 on which the bound U(T) falls below the tolerated rate ε of new flow types per day.
-5. The rule is judged by what happens next: the share of devices whose alert-day rate in the following 14 active days exceeds ε.
+5. The rule is judged by what happens next: the share of enforced learning episodes whose alert-day rate in the following 14 active days exceeds ε. An alert day is a day on which the device shows a flow type it has not shown before.
 
 The full definitions, the parameters and the three expectations written down in advance are in
 [`docs/method.md`](docs/method.md).
@@ -32,7 +32,7 @@ The full definitions, the parameters and the three expectations written down in 
 ## Status
 
 - Method and metrics are frozen. Changes are only made as dated notes in `docs/method.md`.
-- The analysis runs on five public data sources (see [`docs/data.md`](docs/data.md)). Every stored table was reproduced from scratch and checked by a second implementation written from the method text alone.
+- The analysis runs on five public data sources, and on a sixth at the port level only (see [`docs/data.md`](docs/data.md)). Every stored table was reproduced from scratch. The tables of the stopping rules were also recomputed by a second implementation written from the method text alone.
 - The recorder is implemented and tested end to end on real traffic (see below). Recording at clinical sites starts only after ethics approval.
 
 ## Quick check

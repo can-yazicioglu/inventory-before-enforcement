@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
 """Compute estimator inputs, outcomes and exchangeability tests for every device and granularity.
 Usage: run_series.py <inc_day.parquet> <out_dir>"""
-import sys, numpy as np, pandas as pd
+import sys, zlib, numpy as np, pandas as pd
 import os; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gtlib
 
 inc, out = sys.argv[1:3]
-rng = np.random.default_rng(7)
+N_PERM = 1000
+
+
+def test_rng(*key):
+    """One random stream per exchangeability test, named by what is tested. Until 24 Nov 2026 all tests shared one
+    stream, so the result depended on the order in which the database returned the devices and changed from run to run."""
+    return np.random.default_rng([7, zlib.crc32('|'.join(map(str, key)).encode())])
+
+
 STEP = 21
 S_rows, P_rows = [], []
 import os
@@ -24,7 +32,7 @@ for gran in GRANS:
                          span14=int((U[min(o + T + 13, K - 1)] - U[o + T]).days) + 1)   # calendar span of the next 14 active days
                 S_rows.append(r)
         for block in (1, 7):
-            t = gtlib.halves_perm_test(M, rng=rng, block=block)
+            t = gtlib.halves_perm_test(M, n_perm=N_PERM, rng=test_rng(ds, site, dev, gran, block), block=block)
             if t:
                 t.update(dataset=ds, site=site, device=dev, gran=gran, block=block, K=M.shape[1]); P_rows.append(t)
     print(gran, len(S_rows), flush=True)

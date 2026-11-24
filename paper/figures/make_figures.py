@@ -103,7 +103,10 @@ def certification(md):
     save(fig, "fig_certification")
     t = c[c.gran.isin([lv for lv, _ in LEVELS])].pivot_table(index=["dataset", "T"], columns="gran", values="certified")
     md.append("## Figure: share of devices certified by day T (Kaplan-Meier, target 0.3)\n")
-    md.append(t[["port", "svc", "net"]].to_markdown(floatfmt=".3f") + "\n")
+    t = t[["port", "svc", "net"]].reset_index().rename(columns={"dataset": "data", "T": "day T"})
+    t["data"] = t["data"].map(dict(DATASETS))
+    md.append("Empty cell: too few devices are still under observation on that day.\n")
+    md.append(t.to_markdown(index=False, floatfmt=".3f", missingval="") + "\n")
 
 
 def calibration(md):
@@ -138,6 +141,9 @@ def calibration(md):
     t = pd.DataFrame(rows, columns=["data", "level", "devices", "devices with a prediction", "median ratio", "low", "high",
                                     "median ratio corrected", "pooled ratio", "pooled low", "pooled high"])
     md.append("## Figure: calibration (first learning episode, T at least 7, no smoothing)\n")
+    md.append("Ratio: realised new flow types over predicted. Median ratio: over the devices with a prediction above zero, with a "
+              "95 percent bootstrap interval. Pooled ratio: all devices together. In UNSW 2025 v1 one device shows 22,797 flow "
+              "types at the svc level and decides the pooled ratio alone, so the pooled ratio of that archive is not interpretable.\n")
     md.append(t.to_markdown(index=False, floatfmt=".3f") + "\n")
 
 

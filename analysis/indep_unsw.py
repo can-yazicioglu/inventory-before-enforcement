@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Independent normalisation of UNSW-IoTraffic flows -> (device, local day, type) at port and svc level.
-Written from the spec (README + yontem_dondurma.md), pandas only. Compares with the pipeline's inc_day.parquet."""
+Written from the specification (dataset README and docs/method.md), pandas only. Compares with the pipeline's inc_day.parquet."""
 import glob, os, re, collections, sys
 import os; DATA = os.environ.get('IBE_DATA', 'data')
 import pandas as pd, numpy as np, duckdb
@@ -79,7 +79,7 @@ print(dict(stats))
 I = pd.concat(out, ignore_index=True)
 I['day'] = pd.to_datetime(I.day)
 I.to_parquet(DATA + '/audit/indep_unsw_inc.parquet', index=False)
-P = duckdb.connect().execute("SELECT device, day, gran, ftype, n FROM read_parquet('" + DATA + "/v2/inc/inc_day.parquet') WHERE dataset='unsw' AND gran IN ('port','svc')").df()
+P = duckdb.connect().execute("SELECT device, day, gran, ftype, n FROM read_parquet('" + DATA + "/v3/inc_base/inc_day.parquet') WHERE dataset='unsw' AND gran IN ('port','svc')").df()
 P['day'] = pd.to_datetime(P.day)
 m = I.merge(P, on=['device', 'day', 'gran', 'ftype'], how='outer', suffixes=('_i', '_p'), indicator=True)
 for g in ('port', 'svc'):

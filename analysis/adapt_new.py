@@ -10,9 +10,15 @@ SCOPE = """CASE WHEN {a} = '255.255.255.255' OR {a} LIKE '%.255' THEN 'bcast'
        OR {a} = '0.0.0.0' THEN 'lan' ELSE 'wan' END"""
 # UNSW 2025. Payload bytes are not available: DevBytes10 = bytes the device sent within the first 10 packets.
 # Participation proxy: UDP any device bytes, TCP more than two bare control segments (132 bytes).
+# Recording days (correction of 24 Nov 2026): the archives hold one file per local day (SrcFile, 'YY-MM-DD.parquet'), and every
+# file runs up to two minutes past local midnight. Where the next day was not recorded, those two minutes used to appear as a
+# day of their own (3 of 88 days in v1, 33 of 273 in v2). A record now never falls on a later local day than its file.
+DAY_END = """timezone('UTC', timezone('Australia/Sydney',
+             CAST(strptime('20' || substr(SrcFile, 1, 8), '%Y-%m-%d') AS TIMESTAMP) + INTERVAL 86399 SECOND))"""
 for v in ('v1', 'v2'):
     con.execute(f"""COPY (
-      SELECT 'unsw25{v}' AS dataset, '{v}' AS site, Device AS device, make_timestamp(CAST(FirstSeen AS BIGINT)) AS ts, Proto AS proto,
+      SELECT 'unsw25{v}' AS dataset, '{v}' AS site, Device AS device,
+             LEAST(make_timestamp(CAST(FirstSeen AS BIGINT)), {DAY_END}) AS ts, Proto AS proto,
              DevPort AS dev_port, RemPort AS peer_port, {SCOPE.format(a='RemIP')} AS peer_scope, RemIP AS peer_addr,
              CASE WHEN {SCOPE.format(a='RemIP')} = 'lan' THEN 'ip:' || RemIP ELSE RemIP END AS peer_id,
              (FirstDir = 1) AS dev_init, CAST(NULL AS VARCHAR) AS domain, TotalFlowSize AS n_bytes,
