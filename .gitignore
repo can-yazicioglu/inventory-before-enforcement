@@ -14,6 +14,8 @@ devices.csv
 devices_observed.csv
 gateways_seen.json
 neighbours.json
+names_seen.json
+models.csv
 unclassified_domains.json
 site.json
 recipient.asc
