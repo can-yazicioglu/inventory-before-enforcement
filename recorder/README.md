@@ -31,9 +31,10 @@ One JSON line per connection (Zeek `conn.log`), reduced to these fields:
 | `wh`, `wn`, `wd` | only if the site's written permission covers it (`wan_tokens`): one-way tokens of the remote address, its /24 (or /48) and its registrable domain |
 | `open` | present and true on an hourly report about a connection that is still open, and on the last report about one that just ended (see below). Then `ts` is the time of the last packet in that hour, `dur` the age of the connection, and the byte and packet counts cover the time since the previous report |
 
-Next to the records the recorder writes `devices.json` (pseudonym to type, brand, model, group,
-visibility, from the IT officer's table), `coverage.jsonl` (one line per hour: capture reports,
-packets seen and dropped, link state, a fingerprint of the key in use) and `status.json`.
+Next to the records the recorder writes `devices.json` (pseudonym to type, group, visibility,
+switch and a keyed code for the pair of brand and model, from the IT officer's table),
+`coverage.jsonl` (one line per hour: capture reports, packets seen and dropped, link state, a
+fingerprint of the key in use) and `status.json`.
 
 ## What is never recorded
 
@@ -52,6 +53,16 @@ To refuse the name of a computer where a brand or a model is expected, the recor
 by which the devices of the site call each other: what they ask for and announce in the name
 services of the local link (NetBIOS, mDNS, LLMNR), and names that DNS resolves to a local address.
 This list is kept on the key stick only (`names_seen.json`) and is used for nothing else.
+
+The brand and the model that the IT officer types for a device are free text, and no check can
+tell a product from the name of a person, of a room, or of a computer that the network never
+showed. This text is therefore in no file that the recorder exports. `devices.json` carries a
+code for each distinct pair of brand and model (`model_code`: a one-way token made with the key of
+the site, as for the devices, the same for upper and lower case and any amount of white space),
+so devices of one product can still be grouped. The text stands once per pair in `models.csv` on
+the key stick, next to its code and the number of devices. That list is a few lines long. Somebody
+at the site reads it and sends its lines by hand, and this is the only way the text reaches the
+researchers.
 
 ## How connections are tracked
 
@@ -95,7 +106,8 @@ ARP half an hour later. The finished record of the same flow names the host by i
 | A remote host is never named without permission | a host is named by a token of its address only inside the local networks. That list is set in the configuration before the device is shipped (the private ranges unless it says otherwise). The key stick can take networks away from it and cannot add any. An address outside the list is recorded as a device only in a record whose own frame carries the MAC address that answers for the address on the mirrored network, and the name is then that of this MAC address: an entry in the neighbour table, written to the key stick or sent by any device, names nobody. A public range can be declared local only in the configuration, never one wider than the widest private range, and the status then says so | `test_local_networks_cannot_be_widened_from_the_stick`, `test_site_file_cannot_widen_a_narrowed_list`, `test_neighbour_table_alone_names_no_remote_host`, `test_forged_neighbours_on_the_stick_and_on_the_wire`, `test_addresses_on_the_link_outside_the_local_networks_are_reported` |
 | Names read in RAM do not outlive a day | names of remote hosts (DNS answers, TLS server names) are kept in RAM for a day at most. A name stamped in the future is dropped. Names of the site's own hosts are not kept | `test_remote_names_expire_without_traffic`, `test_remote_names_stamped_in_the_future_are_dropped`, `test_names_of_local_addresses_are_not_kept`, `test_name_of_an_address_on_the_link_is_not_kept` |
 | Nothing identifying leaves in the records | every record passes a field whitelist, every file passes a scan for IPv4, IPv6 and MAC address shapes. A batch that fails is not written | `test_leak_check_and_scan`, `test_random_records_never_leak_or_crash`, `test_scan_text_shapes`, `e2e.py` |
-| Labels typed at the site are checked for addresses and computer names | type, group and visibility come from a fixed vocabulary, the switch is a code of up to three characters. Brand and model are free text of up to 40 plain characters. A cell is refused if it has the shape of an IP address or a MAC address (also with doubled or unusual separators, or written as one hexadecimal number), of a name with dots, or of a name that Windows gives a computer by itself, and if it is, or contains, a name by which the devices of the site call each other on the network. What no check can recognise: a computer name that has no dot and never appeared in the name services of the network, part of an address, the name of a person or a room. The site reads `devices.json` before it hands the data over | `test_labels_typed_on_site`, `test_host_names_and_odd_address_shapes_in_labels`, `test_full_run` |
+| Labels typed at the site are checked for addresses and computer names | type, group and visibility come from a fixed vocabulary, the switch is a code of up to three characters. Brand and model are free text of up to 40 plain characters. A cell is refused if it has the shape of an IP address or a MAC address (also with doubled or unusual separators, or written as one hexadecimal number), of a name with dots, or of a name that Windows gives a computer by itself, and if it is, or contains, a name by which the devices of the site call each other on the network. What no check can recognise: a computer name that has no dot and never appeared in the name services of the network, part of an address, the name of a person or a room. That is why the text does not leave by itself (next row) | `test_labels_typed_on_site`, `test_host_names_and_odd_address_shapes_in_labels`, `test_full_run` |
+| Brand and model text is in no exported file | `devices.json` holds, for a device, words of fixed lists (type, group, visibility), the code of a switch and a keyed code for its pair of brand and model. The last step before the file is written lets nothing else through. The text is written once per pair to `models.csv` on the key stick, which the site reads and sends by hand. A list that cannot be written costs no record and no other file | `ModelListTests` (six tests), `test_full_run`, `e2e.py` |
 | Record fields cannot carry text | every field is a number in a range of its own or one of a list of words (protocol, connection state, history letters, Zeek service names, group labels, service types). A value outside the list is written empty, and a list of service names that is too long is cut between names. The status lists a device only once it sent a packet, up to a fixed number | `test_whitelist_names_values`, `test_whitelist_ranges_and_words`, `test_random_records_never_leak_or_crash`, `test_long_service_list_is_cut_between_names`, `test_history_of_a_late_syn_ack_is_kept`, `test_devices_seen_does_not_grow_with_addresses_that_were_only_tried` |
 | Addresses and names learned from the network stay at the site | the table of MAC and IP addresses, the list of routers and the list of computer names are written to the key stick only | `test_neighbour_log_names_devices_behind_the_router`, `test_host_names_and_odd_address_shapes_in_labels`, `e2e.py` |
 | Recording cannot start before ethics approval | capture needs an arm file that names the approval: its date and number, so a reference without a digit, or the placeholder of the instructions, does not arm. Without it nothing is captured and RAM is kept empty | `test_not_armed_writes_nothing_and_keeps_nothing`, `test_placeholder_of_the_instructions_does_not_arm`, `test_approval_reference_must_say_something`, `test_command_line` |
@@ -249,8 +261,9 @@ Then, at the site:
 2. Plug in an exFAT disk labelled `IBE-DATA`. A second copy of the data is kept on the system disk.
 3. Connect the mirror ports. Nothing is captured yet.
 4. After ethics approval, put a file `armed.json` on the key stick: `{"approval_ref": "..."}` with the date and the number of the approval in place of the dots. A text without a digit does not arm. Capture starts within the hour.
-5. After a few days, copy `devices_observed.csv` from the key stick, fill in type, brand, model, group, visibility and switch for each row, and save it on the stick as `devices.csv`. The file holds real addresses and never leaves the stick. Only the labels are exported, attached to pseudonyms. The stick must be in place at seven minutes past the hour: if it is missing then, capture stops and starts again an hour later, and about two hours are not recorded.
+5. After a few days, copy `devices_observed.csv` from the key stick, fill in type, brand, model, group, visibility and switch for each row, and save it on the stick as `devices.csv`. The file holds real addresses and never leaves the stick. Type, group, visibility and switch are exported, attached to pseudonyms. Brand and model are not: a device carries a code for them, and the text is listed in `models.csv` on the stick. The stick must be in place at seven minutes past the hour: if it is missing then, capture stops and starts again an hour later, and about two hours are not recorded.
 6. To hand over data, copy the folder `export` from the data disk and send it by any channel. It holds the same anonymised files, encrypted so that only the researchers can open them. The folder `anon` next to it is the readable form, kept so that the site can inspect what leaves.
+7. The brands and models are not in that folder. Open `models.csv` on the key stick, read every line, and copy the lines into the text of the e-mail to the researchers. If a line names a person, a room or a computer, correct `devices.csv` first and wait for the next hourly run. Do not attach files from the key stick.
 
 Optional files on the key stick: `site.json` (`{"gateway_macs": [...], "local_nets": [...]}`, where
 `local_nets` can only narrow the private ranges: a network outside them is set in the configuration
@@ -267,7 +280,9 @@ written before that names the hosts behind the router wrongly.
 The recorder keeps four more files on the key stick, all with real addresses or names, none of
 which leaves the site: `devices_observed.csv` (the devices seen so far), `gateways_seen.json` (why a
 MAC address counts as a router), `neighbours.json` (which MAC address answers for which IP address)
-and `names_seen.json` (the names by which the devices call each other).
+and `names_seen.json` (the names by which the devices call each other). A fifth file, `models.csv`,
+holds the brands and models as they were typed, one line per product. The recorder never exports
+it either: its lines leave only when the IT officer has read them and sends them (step 7).
 
 Before a second recording with the same stick or disk, wipe both. They carry the day count of the
 first recording, and the key that links its pseudonyms.
@@ -315,3 +330,4 @@ python3 -m ibe_recorder export --dest DIR                       # copy with SHA-
 - Probes that are not connection attempts have no opener, so their roles come from the port rules. An ACK scan from one source port counts as the scanner serving that port, and probes that leave no letter in Zeek's history (no flags, or SYN with FIN) give the sender nothing. Ordinary connection attempts count for the scanner as they should.
 - TCP flows that never got going (one side never spoke, or the opener sent a single packet: stray packets, a scan with ACK or FIN packets, connection attempts from made-up addresses that a server answers) are kept for a day like any silent connection, up to 50,000 of them. Beyond that they are dropped after five minutes, as Zeek does by default. A faster flood of such packets needs the memory any Zeek needs for it (about 5.6 kB per packet for five minutes).
 - The hourly batch is processed in memory (see `batch_size.py` above). A site with more than about a million connections per hour needs a shorter rotation interval. If a run fails for lack of memory, capture is stopped, the RAM disk is emptied and capture starts again after the next run, so that hour and the one before it are lost. The status and the light say so until then.
+- Brand and model text is kept out of every exported file by the program, and out of the e-mail by a person. What the IT officer overlooks in `models.csv` (the name of a room typed as a model, say) reaches the researchers with the lines of that list. The list is short for that reason: one line per product, not one per device.

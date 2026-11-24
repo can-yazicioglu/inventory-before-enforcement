@@ -71,7 +71,7 @@ The recorder is built so that the researchers never hold identifying data.
 - Raw logs exist only in RAM and are deleted every hour, whether or not the hour could be written. The recorder refuses to record if its log directory is not a RAM disk or if any swap could move memory to a disk.
 - Local devices are named by HMAC-SHA256 pseudonyms. The key is created on site, lives on a USB stick that stays there, and is never copied. Pulling the stick stops the recording.
 - Remote hosts are never named. They carry a coarse service type and, only where the site's written permission covers it, one-way tokens.
-- No packet contents, URLs or user names are kept. Names of hosts are read on site only, to derive a service type and to refuse the name of a computer that is typed where a brand or model belongs. They stay in RAM or on the key stick and are never written into a record.
+- No packet contents, URLs or user names are kept. Names of hosts are read on site only, to derive a service type and to refuse the name of a computer that is typed where a brand or model belongs. The brand and model text itself is exported as a keyed code only, and the site sends the short list of products by hand after reading it. Names stay in RAM or on the key stick and are never written into a record.
 - Every record passes a field whitelist, and every output file passes a scan for anything shaped like an address.
 - Capture ports cannot transmit: a kernel rule drops every outgoing frame.
 - Recording starts only after the ethics approval reference has been entered on site, and stops by itself after the permitted number of days.

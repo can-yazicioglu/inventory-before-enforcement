@@ -25,7 +25,7 @@ from zoneinfo import ZoneInfo
 
 from . import core
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 MIN_EPOCH = 1793491200          # 2026-11-01 UTC. A clock before this date was never set.
 DEFAULTS = {
     "site": "A",
@@ -63,7 +63,10 @@ LABEL_OK = re.compile(r"[A-Za-z0-9 _+/().\-]{0,40}")
 # Brand and model are free text. On top of the address scan these shapes are refused: four groups of digits with
 # any separator, eight digits in a row, twelve hexadecimal digits with or without separators (also in groups of
 # four), a dot followed by a letter (a host or domain name). The name of a person or a room cannot be recognised
-# by a pattern: the site reads devices.json before it hands the data over.
+# by a pattern. For that reason the text of these two cells never goes into devices.json or into any other file
+# that is exported: a device carries a keyed code for its pair of brand and model there, and the text stands once
+# per pair in models.csv on the key stick, a list short enough to be read line by line before the site sends it
+# by hand.
 ADDRESS_LIKE = re.compile(r"(?:\d{1,3}[^0-9A-Za-z]){3}\d{1,3}|\d{8}|(?:[0-9A-Fa-f]{2}[^0-9A-Za-z]?){5}[0-9A-Fa-f]{2}"
                           r"|(?:[0-9A-Fa-f]{4}[^0-9A-Za-z]){2}[0-9A-Fa-f]{4}|\.[A-Za-z]")
 # The same shapes once every run of separators is read as one dot ("192. 168. 1. 20", "aa__bb__cc__00__00__01"),
@@ -82,6 +85,12 @@ VOCAB = {
     "visibility": {"", "full", "partial"},
 }
 DEVICE_COLUMNS = ("mac", "ip", "type", "brand", "model", "group", "visibility", "switch")
+MODEL_LIST = "models.csv"                   # key stick only: code, brand, model, number of devices
+MODEL_CODE = re.compile(r"m[a-z2-7]{10}")
+# What devices.json may hold for a device: a word of a fixed list, the code of a switch, a keyed code. No free text.
+EXPORTED_LABELS = {"type": VOCAB["type"].__contains__, "group": VOCAB["group"].__contains__,
+                   "visibility": VOCAB["visibility"].__contains__, "switch": SWITCH_OK.fullmatch,
+                   "model_code": lambda v: v == "" or MODEL_CODE.fullmatch(v)}
 
 
 def load_config(path=None):
@@ -386,6 +395,7 @@ STATE_ENTRIES = {
     "neighbours": (_count, int),
     "devices_labelled": (_count, int),
     "devices_in_table": (_count, int),
+    "models_in_table": (_count, int),
     "last_run": (_number, int),
     "errors": (_list(lambda e: isinstance(e, dict) and set(e) == {"t", "e"} and _number(e["t"]) and _text(e["e"])), list),
     "clock_jumps": (_list(lambda e: isinstance(e, dict) and set(e) == {"t", "back_s"} and all(map(_number, e.values()))), list),
@@ -784,9 +794,18 @@ def names_a_host(text, names):
     return plain in names or any(marked and len(n) >= 6 and n in plain for n, marked in names.items())
 
 
+def model_key(brand, model):
+    """Two spellings of one product are one product: upper and lower case and the amount of white space do not count."""
+    return "|".join(" ".join(x.split()).casefold() for x in (brand, model))
+
+
 def load_devices(key_dir, pz, names=None):
-    """IT officer's table. Returns {pseudonym: labels}. Unsafe label text is refused, not written."""
-    out, problems = {}, []
+    """IT officer's table. Returns ({pseudonym: labels}, {model code: [brand, model, devices]}, problems).
+
+    Unsafe label text is refused, not written. The labels are those of EXPORTED_LABELS and hold no free text:
+    the brand and the model of a device are replaced by one keyed code for the pair. The text itself is
+    returned apart, once per code, for the list on the key stick (write_models)."""
+    out, text, problems = {}, {}, []
     for n, row in enumerate(_read_device_rows(os.path.join(key_dir, "devices.csv"), problems), 2):
         labels = {}
         for c in DEVICE_COLUMNS[2:]:
@@ -800,14 +819,50 @@ def load_devices(key_dir, pz, names=None):
             labels[c] = v
         if not any(labels.values()):
             continue
+        product = (" ".join(labels.pop("brand").split()), " ".join(labels.pop("model").split()))
+        labels["model_code"] = "m" + pz.tok("model", model_key(*product)) if any(product) else ""
         try:
             if row.get("mac"):
-                out[pz.device(row["mac"])] = labels
+                dev = pz.device(row["mac"])
             elif row.get("ip"):
-                out[pz.device_by_ip(row["ip"].split()[0])] = labels
+                dev = pz.device_by_ip(row["ip"].split()[0])
+            else:
+                continue
         except ValueError:
             problems.append(f"line {n}: bad mac or ip")
-    return out, problems
+            continue
+        out[dev], text[dev] = labels, product
+    spelt = {}
+    for dev, labels in out.items():
+        if labels["model_code"]:
+            count = spelt.setdefault(labels["model_code"], {})
+            count[text[dev]] = count.get(text[dev], 0) + 1
+    # one spelling per code: the one most devices have, and among equals the first in sorting order, so that
+    # the list does not depend on the order of the rows
+    models = {code: [*min(count, key=lambda t: (-count[t], t)), sum(count.values())] for code, count in spelt.items()}
+    return out, models, problems
+
+
+def exported_labels(labels):
+    """The labels as they leave the site. A value of another form than EXPORTED_LABELS allows is left empty,
+    and a label of another name is left out, whatever put it there."""
+    return {dev: {c: (v.get(c, "") if isinstance(v.get(c, ""), str) and ok(v.get(c, "")) else "")
+                  for c, ok in EXPORTED_LABELS.items()} for dev, v in labels.items()}
+
+
+def write_models(key_dir, models):
+    """The list of brands and models on the key stick, one line for each distinct pair: the code that devices.json
+    carries, the text as the site typed it, the number of devices. The file stays on site. Somebody of the site
+    reads it and sends its lines by hand, which is the only way this text reaches the researchers."""
+    path = os.path.join(key_dir, MODEL_LIST)
+    if not models and not os.path.exists(path):
+        return
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    w.writerow(("code", "brand", "model", "devices"))
+    for code, (brand, model, n) in sorted(models.items(), key=lambda kv: (kv[1][0].casefold(), kv[1][1].casefold(), kv[0])):
+        w.writerow((code, brand, model, n))
+    _write_atomic(path, buf.getvalue().encode())
 
 
 NOT_PRIVATE = "a network outside the private ranges or outside the local networks of the configuration " \
@@ -1305,7 +1360,7 @@ def _process(cfg, st, now, files):
     conn, n_dup = dedup(conn, cfg["dedup_window_s"], gateways)
     dropped["duplicate"] = dropped.get("duplicate", 0) + n_dup
 
-    labels, problems = load_devices(cfg["key_dir"], pz, host)
+    labels, models, problems = load_devices(cfg["key_dir"], pz, host)
     categories = set(cat.rules.values()) | set(core.PORT_CATEGORY.values()) | {"other", "unknown"}
     unclassified, lines, days, devs, n_open, odd_history = {}, [], set(st["days"]), set(), 0, 0
     for iface, r in conn:
@@ -1384,6 +1439,7 @@ def _process(cfg, st, now, files):
             for k, v in unclassified.items():
                 old[k] = core._int(old.get(k)) + v
             _write_atomic(up, json.dumps(old, indent=1, sort_keys=True).encode())
+        write_models(cfg["key_dir"], models)       # last: a list that cannot be written costs no other file
     except OSError as e:
         st["errors"].append({"t": now, "e": f"cannot write to key stick: {e.strerror}"})
     seen = sorted(set(st.get("devices_seen", [])) | devs)
@@ -1391,11 +1447,11 @@ def _process(cfg, st, now, files):
         st["warnings"].append("more devices than the status can list, the list is cut")
         seen = seen[:MAX_DEVICES_SEEN]
     st.update(devices_seen=seen, devices_labelled=len([d for d in seen if d in labels]),
-              devices_in_table=len(labels), device_table_problems=problems[:20],
+              devices_in_table=len(labels), models_in_table=len(models), device_table_problems=problems[:20],
               gateways=sorted(pz.device(m) for m in gateways))
     for d in cfg["data_dirs"]:
         try:
-            _write_atomic(os.path.join(d, "devices.json"), json.dumps(labels, sort_keys=True).encode())
+            _write_atomic(os.path.join(d, "devices.json"), json.dumps(exported_labels(labels), sort_keys=True).encode())
         except OSError:
             pass
     return n_written, quality

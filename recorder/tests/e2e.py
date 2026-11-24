@@ -17,11 +17,14 @@ days are identical, the answers are known in advance:
      including the records whose handshake was not seen and the reports about open connections
   6. no new flow type appears after the first day, so GT-C stops at T = 10 for epsilon 0.3 and
      at T = 7 for epsilon 1.0 on every device, with no alert day afterwards
+  7. the brand and model that the site types for its devices (after the first day, as the IT officer would)
+     are in no file that leaves: the files carry one keyed code per product, the text is on the key stick
 
 Usage: e2e.py --zeek /opt/zeek/bin/zeek --pcap capture.pcap --work DIR [--days 30]
 Needs: zeek, duckdb, pandas, numpy, scipy, pyarrow.
 """
 import argparse
+import csv
 import datetime
 import glob
 import gzip
@@ -39,6 +42,10 @@ from ibe_recorder import core, pipeline  # noqa: E402
 
 TZ = "Europe/Istanbul"
 STEMS = pipeline.STEMS
+# What the site types as brand and model: one product in two spellings, and two texts that no pattern can tell
+# from a product (the room of a person, the name of a computer that the network never showed).
+PRODUCTS = [("Northwind Imaging", "Retinascan 3000"), ("northwind imaging", "RETINASCAN  3000"),
+            ("Northwind Imaging", "Doktor Denizkaya odasi"), ("Northwind Imaging", "MUHASEBE2")]
 
 
 def check(name, ok, detail=""):
@@ -88,7 +95,19 @@ def write_day(logs, raw, iface, shift, tag, jitter=0.0):
                 f.write(json.dumps(dict(r, ts=ts)) + "\n")
 
 
-def record_side(work, logs, days, ifaces, shift0, tokens):
+def label_devices(cfg):
+    """The IT officer fills in the table of the devices seen so far and saves it on the key stick."""
+    with open(os.path.join(cfg["key_dir"], "devices_observed.csv"), encoding="utf-8", newline="") as f:
+        rows = list(csv.DictReader(f))
+    with open(os.path.join(cfg["key_dir"], "devices.csv"), "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(pipeline.DEVICE_COLUMNS)
+        for n, r in enumerate(rows):
+            w.writerow([r["mac"], r["ip"], "other", *PRODUCTS[n % len(PRODUCTS)], ("agentless", "general")[n % 2], "full", "A"])
+    return len(rows)
+
+
+def record_side(work, logs, days, ifaces, shift0, tokens, label=False):
     cfg = dict(pipeline.DEFAULTS, raw_dir=f"{work}/raw", data_dirs=[f"{work}/ssd", f"{work}/sd"],
                key_dir=f"{work}/key", state_dir=f"{work}/state", manage_services=False, interfaces=ifaces,
                sysfs_net=f"{work}/nosys", proc_swaps=f"{work}/noswaps", wan_tokens=tokens, max_recording_days=days,
@@ -100,14 +119,16 @@ def record_side(work, logs, days, ifaces, shift0, tokens):
     with open(os.path.join(cfg["key_dir"], "armed.json"), "w") as f:
         json.dump({"approval_ref": "end-to-end test 1"}, f)
     t_end = max(r["ts"] for r in logs["conn"] + logs["open_conn"])
-    st = {}
+    st, rows = {}, 0
     for k in range(days):
         for n, i in enumerate(ifaces):
             write_day(logs, cfg["raw_dir"], i, shift0 + k * 86400, f"day{k:02d}", jitter=0.004 * n)
         st = pipeline.run_once(cfg, now=int(t_end + shift0 + k * 86400 + 600))
         if st["state"] != "ok" or st["errors"]:
             check(f"day {k}: recorder state", False, f"{st['state']} {st['errors']}")
-    return cfg, st
+        if label and k == 0:
+            rows = label_devices(cfg)
+    return cfg, st, rows
 
 
 def outputs(cfg):
@@ -263,9 +284,9 @@ def main():
     start = datetime.datetime(2026, 12, 1, 0, 20, tzinfo=ZoneInfo(TZ)).timestamp()
     secrets = secrets_of(logs)
 
-    one, st1 = record_side(os.path.join(a.work, "one"), logs, a.days, ["eth1"], start - t0, tokens=True)
-    two, st2 = record_side(os.path.join(a.work, "two"), logs, a.days, ["eth1", "eth2"], start - t0, tokens=True)
-    off, st3 = record_side(os.path.join(a.work, "notok"), logs, 2, ["eth1"], start - t0, tokens=False)
+    one, st1, n_rows = record_side(os.path.join(a.work, "one"), logs, a.days, ["eth1"], start - t0, tokens=True, label=True)
+    two, st2, _ = record_side(os.path.join(a.work, "two"), logs, a.days, ["eth1", "eth2"], start - t0, tokens=True)
+    off, st3, _ = record_side(os.path.join(a.work, "notok"), logs, 2, ["eth1"], start - t0, tokens=False)
 
     for name, cfg, st, ports in (("one port", one, st1, 1), ("two ports", two, st2, 2)):
         dropped = sum(st["records_dropped"].values())
@@ -322,13 +343,33 @@ def main():
     hits = sorted({x for w in words for x in secrets if x in w} | {w for w in words if key.hex()[:20] in w})
     check("no address, name or key in the output", not hits,
           f"{n_files} files, {len(words)} distinct words, {len(secrets)} raw strings searched, hits {hits[:5]}")
+    # Brand and model. No pattern can tell a product from the name of a person or of a room, so the text may be
+    # in no file that leaves. The files carry one keyed code for each product, the text is listed on the key stick.
+    with open(os.path.join(one["data_dirs"][0], "devices.json"), encoding="utf-8") as f:
+        labelled = json.load(f)
+    with open(os.path.join(one["key_dir"], pipeline.MODEL_LIST), encoding="utf-8", newline="") as f:
+        listed = list(csv.DictReader(f))
+    typed = sorted({w.lower() for pair in PRODUCTS for w in re.findall(r"[A-Za-z0-9]{7,}", " ".join(pair))})
+    hits = sorted(t for t in typed if any(t in w.lower() for w in words))
+    codes = {v["model_code"] for v in labelled.values()}
+    devices = seen - set(st1["gateways"])          # a router can be a peer in the records, it is not in the table to label
+    check("brand and model text is in no output, the output carries one keyed code per product",
+          not hits and set(labelled) == devices and len(labelled) == n_rows == st1["devices_labelled"]
+          and all(set(v) == set(pipeline.EXPORTED_LABELS) and pipeline.MODEL_CODE.fullmatch(v["model_code"])
+                  for v in labelled.values())
+          and codes == {r["code"] for r in listed} and len(listed) == st1["models_in_table"] == 3
+          and sum(int(r["devices"]) for r in listed) == len(labelled)
+          and sorted(r["model"] for r in listed) == ["Doktor Denizkaya odasi", "MUHASEBE2", "Retinascan 3000"],
+          f"{len(labelled)} devices labelled, {len(listed)} products in the list on the key stick, "
+          f"{len(typed)} typed words searched, hits {hits}")
     r3 = outputs(off)
     check("without permission for tokens, remote hosts carry a service type only",
           all("wh" not in r and "wn" not in r and "wd" not in r for r in r3) and any("wc" in r for r in r3),
           f"service types: {sorted({r['wc'] for r in r3 if 'wc' in r})}")
     stick = sorted(os.listdir(one["key_dir"]))
     check("files with real addresses stay on the key stick",
-          all(x in stick for x in ("devices_observed.csv", "gateways_seen.json", "neighbours.json")), str(stick))
+          all(x in stick for x in ("devices_observed.csv", "gateways_seen.json", "neighbours.json", "names_seen.json",
+                                   pipeline.MODEL_LIST)), str(stick))
 
     # The replayed day starts at 00:20. The outage rule (working hours 09:00 to 18:00 here) is applied only
     # if the capture is long enough to cover them, otherwise it would rightly drop every day.

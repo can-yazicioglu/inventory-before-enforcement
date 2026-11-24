@@ -1,6 +1,8 @@
 # Copyright 2026 Can Yazicioglu
 # SPDX-License-Identifier: Apache-2.0
+import csv
 import gzip
+import io
 import json
 import os
 import random
@@ -331,13 +333,23 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(labels[PZ.device(DEV1)]["type"], "medical_pc")
         self.assertEqual(labels[PZ.device(DEV2)]["type"], "")
         self.assertEqual(st["devices_labelled"], 2)
-        # nothing that leaves the site contains an address, a name or a real domain
+        # brand and model leave as one keyed code for the pair, their text is listed on the key stick only
+        self.assertEqual(labels[PZ.device(DEV1)], {"type": "medical_pc", "group": "agentless", "visibility": "full",
+                                                   "switch": "A", "model_code": "m" + PZ.tok("model", "optovue|solix")})
+        self.assertEqual(labels[PZ.device(DEV2)]["model_code"], "m" + PZ.tok("model", "hp|laserjet"))
+        self.assertEqual(st["models_in_table"], 2)
+        self.assertEqual(self.read(self.cfg["key_dir"], "models.csv").splitlines(),
+                         ["code,brand,model,devices", labels[PZ.device(DEV2)]["model_code"] + ",HP,LaserJet,1",
+                          labels[PZ.device(DEV1)]["model_code"] + ",Optovue,Solix,1"])
+        # nothing that leaves the site contains an address, a name, a real domain or the text of a label
         for d in self.cfg["data_dirs"]:
             self.assertEqual(sorted(n.split("-")[0] for n in os.listdir(d)),
                              ["anon", "coverage.jsonl", "devices.json", "status.json"])
             for n in os.listdir(d):
                 text = self.read(d, n)
                 self.assertIsNone(core.scan_text(text), n)
+                for word in ("optovue", "solix", "laserjet", "ahmet"):
+                    self.assertNotIn(word, text.lower(), n)
                 for secret in ("192.168", "aa:bb", "teamviewer", "Ahmet", "aabbcc", KEY.hex()[:16]):
                     self.assertNotIn(secret, text, n)
         # the list for the IT officer stays on the key stick, with real addresses and his labels
@@ -533,8 +545,9 @@ class PipelineTests(unittest.TestCase):
         with open(os.path.join(self.cfg["key_dir"], "devices.csv"), "w", encoding="utf-8-sig") as f:
             f.write("MAC;IP;Type;Brand;Model;Group;Visibility;Switch\n"
                     f"{DEV1.upper().replace(':', '-')};;ip_phone;Yealink;T31P;agentless;full;A\n")
-        labels, problems = pipeline.load_devices(self.cfg["key_dir"], PZ)
+        labels, models, problems = pipeline.load_devices(self.cfg["key_dir"], PZ)
         self.assertEqual(labels[PZ.device(DEV1)]["type"], "ip_phone")
+        self.assertEqual(models, {labels[PZ.device(DEV1)]["model_code"]: ["Yealink", "T31P", 1]})
         self.assertEqual(problems, [])
 
     def test_open_reports_are_read_and_marked(self):
@@ -1375,10 +1388,14 @@ class PipelineTests(unittest.TestCase):
             for i, (brand, model, sw) in enumerate(rows):
                 f.write(f"aa:bb:cc:00:01:{i:02x},,printer,{brand},{model},agentless,full,{sw}\n")
             f.write("aa:bb:cc:00:01:99,,printer,HP,one cell,too,many,agentless,full,A\n")     # a comma inside a name
-        labels, problems = pipeline.load_devices(self.cfg["key_dir"], PZ)
-        got = [(v["brand"], v["model"], v["switch"]) for v in (labels[PZ.device(f"aa:bb:cc:00:01:{i:02x}")] for i in range(8))]
+        labels, models, problems = pipeline.load_devices(self.cfg["key_dir"], PZ)
+        text = {code: (brand, model) for code, (brand, model, _) in models.items()}      # what the key stick lists
+        got = [text[v["model_code"]] + (v["switch"],) for v in (labels[PZ.device(f"aa:bb:cc:00:01:{i:02x}")] for i in range(8))]
         self.assertEqual(got, [("HP", "LaserJet M404dn", "A"), ("", "x", "A"), ("", "x", "A"), ("x", "", "A"),
                                ("x", "", "A"), ("x", "", "A"), ("x", "y", ""), ("x", "", "B2")])
+        self.assertEqual(sorted(text.values()), [("", "x"), ("HP", "LaserJet M404dn"), ("x", ""), ("x", "y")])
+        self.assertEqual(sorted(n for _, _, n in models.values()), [1, 1, 2, 4])
+        self.assertTrue(all(set(v) == set(pipeline.EXPORTED_LABELS) for v in labels.values()))   # no brand, no model
         self.assertGreaterEqual(len(problems), 8)
 
     def test_settings_must_be_spelt_and_typed_right(self):
@@ -1728,16 +1745,18 @@ class ThirdReviewTests(unittest.TestCase):
         self.write("eth1", "conn", [conn("192.168.1.10", "192.168.1.20", DEV1, DEV2)])
         st = pipeline.run_once(self.cfg, now=NOW)
         labels = json.loads(self.read(self.cfg["data_dirs"][0], "devices.json"))
-        got = [labels[PZ.device(f"aa:bb:cc:00:02:{i:02x}")]["model"] for i in range(len(refused + kept))]
-        self.assertEqual(got, [""] * len(refused) + kept)
+        listed = {r["code"]: r["model"] for r in csv.DictReader(io.StringIO(self.read(self.cfg["key_dir"], "models.csv")))}
+        got = [listed[labels[PZ.device(f"aa:bb:cc:00:02:{i:02x}")]["model_code"]] for i in range(len(refused + kept))]
+        self.assertEqual(got, [""] * len(refused) + kept)        # a refused name is not in the list of the site either
         self.assertEqual(st["devices_in_table"], len(refused + kept))
+        self.assertEqual(st["models_in_table"], 1 + len(kept))   # the brand alone, and the brand with each kept model
         seen = json.loads(self.read(self.cfg["key_dir"], "names_seen.json"))          # stays on the key stick
         self.assertEqual(seen, {"muayenepc03": True, "kasa2": True, "sekreter": False, "workgroup": False, "octarsiv": True})
         for d in self.cfg["data_dirs"]:
             for n in os.listdir(d):
                 text = self.read(d, n).lower()
-                for name in ("muayene", "kasa2", "sekreter\"", "arsiv", "4f2k9qa"):
-                    self.assertNotIn(name, text, n)
+                for name in ("muayene", "kasa2", "sekreter", "arsiv", "4f2k9qa", "laserjet", "optiplex", "solix", "fortigate"):
+                    self.assertNotIn(name, text, n)              # neither a refused name nor a model that was kept
         # a damaged or forged list on the stick can only refuse more
         with open(os.path.join(self.cfg["key_dir"], "names_seen.json"), "w") as f:
             f.write('{"x": 1, "laserjet": true, "' + "a" * 99 + '": true, "Bad Name": true, "solix": []}')
@@ -1872,6 +1891,149 @@ class ThirdReviewTests(unittest.TestCase):
         self.write("eth1", "ssl", [{"id.resp_h": "193.140.1.7", "server_name": "oct-arsiv.klinik.example"}])
         pipeline.run_once(self.cfg, now=NOW)
         self.assertEqual(list(json.loads(self.read(self.cfg["raw_dir"], "ip2dom.json"))), ["52.7.7.8"])
+
+
+class ModelListTests(unittest.TestCase):
+    """Brand and model are free text, and no pattern recognises the name of a person, of a room or of a computer
+    that the network never showed. Since 24 November 2026 this text is in no file that is exported: devices.json
+    carries a keyed code for each pair of brand and model, and the text is listed once per pair in models.csv on
+    the key stick, which the site reads and sends by hand."""
+    setUp, tearDown = PipelineTests.setUp, PipelineTests.tearDown
+    link, arm, write, read, outputs = (PipelineTests.link, PipelineTests.arm, PipelineTests.write, PipelineTests.read,
+                                       PipelineTests.outputs)
+
+    def table(self, rows):
+        with open(os.path.join(self.cfg["key_dir"], "devices.csv"), "w") as f:
+            f.write("mac,ip,type,brand,model,group,visibility,switch\n")
+            for i, (brand, model) in enumerate(rows):
+                f.write(f"aa:bb:cc:00:03:{i:02x},,printer,{brand},{model},agentless,full,A\n")
+
+    def run_hour(self, k=0, cfg=None):
+        self.write("eth1", "conn", [conn("192.168.1.10", "192.168.1.20", DEV1, DEV2, ts=T0 + 0.5 + 3600 * k)])
+        return pipeline.run_once(cfg or self.cfg, now=NOW + 3600 * k)
+
+    def listed(self):
+        return list(csv.reader(io.StringIO(self.read(self.cfg["key_dir"], "models.csv"))))
+
+    def test_text_that_no_pattern_recognises_stays_on_the_stick(self):
+        """A person, a room and a computer name that the network never showed, typed where a model belongs."""
+        typed = ["Dr Ayse Yilmaz odasi", "Zemin kat vezne", "MUHASEBE2", "Canon iR2625"]
+        self.arm()
+        self.table([("Canon", t) for t in typed])
+        st = self.run_hour()
+        self.assertEqual(st["state"], "ok")
+        self.assertEqual(st["device_table_problems"], [])                 # no check refused them: that is the point
+        self.assertEqual(sorted(r[2] for r in self.listed()[1:]), sorted(typed))    # the site sees what it typed
+        for d in self.cfg["data_dirs"] + [self.cfg["state_dir"]]:
+            for n in os.listdir(d):
+                text = self.read(d, n).lower()
+                for word in ("ayse", "yilmaz", "odasi", "zemin", "vezne", "muhasebe", "canon", "ir2625"):
+                    self.assertNotIn(word, text, n)
+        labels = json.loads(self.read(self.cfg["data_dirs"][0], "devices.json"))
+        self.assertEqual(len(labels), 4)
+        for v in labels.values():                                         # fixed words and codes, nothing else
+            self.assertEqual(set(v), {"type", "group", "visibility", "switch", "model_code"})
+            self.assertEqual((v["type"], v["group"], v["visibility"], v["switch"]), ("printer", "agentless", "full", "A"))
+            self.assertRegex(v["model_code"], r"^m[a-z2-7]{10}$")
+        self.assertEqual(len({v["model_code"] for v in labels.values()}), 4)
+        self.assertEqual(st["models_in_table"], 4)
+
+    def test_one_code_for_a_product_however_it_is_spelt(self):
+        self.table([("Yealink", "SIP-T31P"), ("YEALINK", "sip-t31p"), (" yealink ", "SIP-T31P"), ("Yealink", "SIP-T33G"),
+                    ("Yealink", ""), ("", "SIP-T31P"), ("", ""), ("Yealink", "SIP-T31P"), ("AVAYA", "J139"), ("Avaya", "J139")])
+        labels, models, problems = pipeline.load_devices(self.cfg["key_dir"], PZ)
+        code = [labels[PZ.device(f"aa:bb:cc:00:03:{i:02x}")]["model_code"] for i in range(10)]
+        self.assertEqual(code[0], "m" + PZ.tok("model", "yealink|sip-t31p"))
+        self.assertEqual(code[0], pipeline.MODEL_CODE.fullmatch(code[0]).group())
+        self.assertTrue(code[0] == code[1] == code[2] == code[7])
+        self.assertEqual(len(set(code)), 6)                # the phone, two other phones, brand alone, model alone, nothing
+        self.assertEqual(code[6], "")                                     # nothing typed: no code
+        self.assertEqual(models[code[0]], ["Yealink", "SIP-T31P", 4])     # the spelling that most rows have
+        self.assertEqual(models[code[8]], ["AVAYA", "J139", 2])           # among equals the first in sorting order
+        self.assertEqual(sorted(n for _, _, n in models.values()), [1, 1, 1, 2, 4])
+        self.assertEqual(problems, [])
+        # the list does not depend on the order of the rows
+        with open(os.path.join(self.cfg["key_dir"], "devices.csv")) as f:
+            head, *rows = f.read().splitlines()
+        with open(os.path.join(self.cfg["key_dir"], "devices.csv"), "w") as f:
+            f.write("\n".join([head] + rows[::-1]) + "\n")
+        self.assertEqual(pipeline.load_devices(self.cfg["key_dir"], PZ)[1], models)
+        # the code depends on the key of the site: the same product has another code elsewhere
+        other, _, _ = pipeline.load_devices(self.cfg["key_dir"], core.Pseudonymiser(bytes(32)))
+        self.assertTrue(set(v["model_code"] for v in other.values()).isdisjoint(c for c in code if c))
+        # a row without a usable address names no device and is not counted in the list
+        with open(os.path.join(self.cfg["key_dir"], "devices.csv"), "a") as f:
+            f.write("not-a-mac,,printer,Brother,HL-L2350DW,agentless,full,A\n,,printer,Brother,HL-L2350DW,agentless,full,A\n")
+        labels, models, problems = pipeline.load_devices(self.cfg["key_dir"], PZ)
+        self.assertEqual(len(labels), 10)
+        self.assertNotIn("Brother", [m[0] for m in models.values()])
+        self.assertEqual(problems, ["line 12: bad mac or ip"])
+
+    def test_the_list_follows_the_table(self):
+        self.arm()
+        st = self.run_hour(0)
+        self.assertNotIn("models.csv", os.listdir(self.cfg["key_dir"]))   # no table yet: no list
+        self.assertEqual(st["models_in_table"], 0)
+        self.table([("HP", "LaserJet M404dn"), ("HP", "LaserJet M404dn"), ("Kyocera", "ECOSYS M2040dn")])
+        self.run_hour(1)
+        hp, ky = "m" + PZ.tok("model", "hp|laserjet m404dn"), "m" + PZ.tok("model", "kyocera|ecosys m2040dn")
+        self.assertEqual(self.listed(), [["code", "brand", "model", "devices"], [hp, "HP", "LaserJet M404dn", "2"],
+                                         [ky, "Kyocera", "ECOSYS M2040dn", "1"]])
+        self.table([("HP", "LaserJet M404dn")])                           # the site corrects its table
+        st = self.run_hour(2)
+        self.assertEqual(self.listed(), [["code", "brand", "model", "devices"], [hp, "HP", "LaserJet M404dn", "1"]])
+        self.assertEqual(st["models_in_table"], 1)
+        os.remove(os.path.join(self.cfg["key_dir"], "devices.csv"))
+        self.run_hour(3)
+        self.assertEqual(self.listed(), [["code", "brand", "model", "devices"]])       # an old list does not linger
+        self.assertEqual(json.loads(self.read(self.cfg["data_dirs"][0], "devices.json")), {})
+
+    def test_labels_of_another_form_do_not_leave(self):
+        """The last step before the file is written lets through fixed words and codes only, whatever came before."""
+        dev = PZ.device(DEV1)
+        got = pipeline.exported_labels({dev: {"type": "printer", "group": "Muhasebe", "visibility": "full", "switch": "A12B",
+                                              "model_code": "LaserJet", "brand": "HP", "model": "LaserJet", "note": "x"},
+                                        "x": {"model_code": None, "type": 7}})
+        self.assertEqual(got, {dev: {"type": "printer", "group": "", "visibility": "full", "switch": "", "model_code": ""},
+                               "x": {"type": "", "group": "", "visibility": "", "switch": "", "model_code": ""}})
+
+    def test_a_list_that_cannot_be_written_costs_nothing_else(self):
+        self.arm()
+        self.table([("HP", "LaserJet M404dn")])
+        os.makedirs(os.path.join(self.cfg["key_dir"], "models.csv"))      # a folder stands where the list belongs
+        st = self.run_hour()
+        self.assertEqual(st["state"], "ok")
+        self.assertEqual(len(self.outputs()), 1)
+        self.assertEqual([e["e"].split(":")[0] for e in st["errors"]], ["cannot write to key stick"])
+        self.assertIn("devices_observed.csv", os.listdir(self.cfg["key_dir"]))
+        labels = json.loads(self.read(self.cfg["data_dirs"][0], "devices.json"))
+        self.assertEqual([v["model_code"] for v in labels.values()], ["m" + PZ.tok("model", "hp|laserjet m404dn")])
+
+    @unittest.skipUnless(shutil.which("gpg"), "gpg is not installed")
+    def test_the_list_is_in_no_export(self):
+        home = os.path.join(self.tmp.name, "researcher")
+        os.makedirs(home, mode=0o700)
+        gpg = ["gpg", "--batch", "--yes", "--homedir", home, "--pinentry-mode", "loopback", "--passphrase", ""]
+        subprocess.run(gpg + ["--quick-generate-key", "ibe-test", "default", "default", "never"], check=True,
+                       capture_output=True)
+        pub = os.path.join(self.tmp.name, "recipient.asc")
+        subprocess.run(gpg + ["--armor", "--output", pub, "--export", "ibe-test"], check=True, capture_output=True)
+        self.arm()
+        self.table([("Hikvision", "DS-2CD2143G0-I"), ("Hikvision", "Bekleme salonu kamerasi")])
+        cfg = dict(self.cfg, export_recipient=pub)
+        self.run_hour(cfg=cfg)
+        exp = os.path.join(self.tmp.name, "ssd", "export")
+        self.assertEqual(sorted(n.split("-")[0] for n in os.listdir(exp)),
+                         ["anon", "coverage.jsonl.gpg", "devices.json.gpg", "status.json.gpg"])
+        for n in os.listdir(exp):                                          # what the researcher can open
+            back = subprocess.run(gpg + ["--decrypt", os.path.join(exp, n)], check=True, capture_output=True).stdout
+            text = (gzip.decompress(back) if n.endswith(".gz.gpg") else back).decode().lower()
+            for word in ("hikvision", "2cd2143", "bekleme", "salonu", "kamerasi"):
+                self.assertNotIn(word, text, n)
+        for d in self.cfg["data_dirs"] + [exp]:                            # and no copy of the list beside the data
+            self.assertNotIn("models.csv", os.listdir(d))
+            self.assertNotIn("models.csv.gpg", os.listdir(d))
+        self.assertEqual(len(self.listed()), 3)
 
 
 if __name__ == "__main__":
