@@ -8,7 +8,7 @@ Reads the stored tables under $IBE_DATA: v3/res_base (12 homes, UNSW 2016), val/
 (IoT-ServTrace, port level only), deakin/res (Deakin D-IoT, if that trace was prepared) and out (tables over several traces).
 Writes eight figures as PDF and PNG, and results_tables.md with the numbers behind every mark:
   fig_exceedance      exceedance after enforcement, three rules
-  fig_certification   share of devices certified by day T
+  fig_certification   share of devices that GT-C enforces by day T
   fig_calibration     realised over predicted new flow types
   fig_discrimination  fixed 14 days on the episodes that GT-C enforced and on those it did not
   fig_risk_coverage   exceedance against the share of episodes enforced, for every threshold of the rules
@@ -39,7 +39,7 @@ PORT_ONLY = [("servtrace19", "ServTrace 2019"), ("servtrace22", "ServTrace 2022"
 ALL_SETS = DATASETS + PORT_ONLY
 LEVELS = [("port", "port level"), ("svc", "svc level (primary)"), ("net", "net level")]
 RULES = [("GT-C", "GT-C", BLUE, "o"), ("quiet streak", "quiet streak", AQUA, "^"), ("fixed 14", "fixed 14 days", ORANGE, "s")]
-LEVEL_STYLE = {"port": (LIGHT, "o"), "svc": (BLUE, "^"), "net": (DARK, "s"), "host": (DARK, "s")}
+LEVEL_STYLE = {"port": (LIGHT, "o"), "svc": (BLUE, "^"), "net": (DARK, "s"), "host": (DARK, "D")}
 
 plt.rcParams.update({
     "font.family": "DejaVu Sans", "font.size": 8, "axes.edgecolor": MUTED, "axes.labelcolor": INK,
@@ -91,7 +91,7 @@ def exceedance(md):
                         label=rule_name if (i == 0 and lv == "port") else None)
                 rows.append((ds_name, lv, rule_name, int(r.episodes), r.stopped, r.med_T, r.violA, r.violA_lo, r.violA_hi))
             if lv != "port" and (ds, ds_name) in PORT_ONLY:
-                ax.text(0.02, i, "port level only", color=MUTED, fontsize=6.5, va="center")
+                ax.text(0.13, i, "port level only", color=MUTED, fontsize=6.5, va="center")
         ax.axvline(0.10, color=MUTED, lw=0.6, ls=(0, (3, 3)), zorder=1)
         ax.set_xlim(-0.03, 0.85)
         ax.set_xticks([0, 0.1, 0.25, 0.5, 0.75])
@@ -132,10 +132,10 @@ def certification(md):
         ax.set_yticklabels(["0", "25", "50", "75", "100"])
         ax.tick_params(axis="y", colors=MUTED)
         ax.set_xlim(5, max(c[c.dataset == ds]["T"]) * 1.12)
-    axes[0].set_ylabel("devices certified by GT-C (percent)")
+    axes[0].set_ylabel("devices enforced by GT-C (percent)")
     save(fig, "fig_certification")
     t = c[c.gran.isin([lv for lv, _ in LEVELS])].pivot_table(index=["dataset", "T"], columns="gran", values="certified")
-    md.append("## Figure: share of devices certified by day T (Kaplan-Meier, target 0.3)\n")
+    md.append("## Figure: share of devices that GT-C enforces by day T (Kaplan-Meier, target 0.3)\n")
     t = t[["port", "svc", "net"]].reset_index().rename(columns={"dataset": "data", "T": "day T"})
     t["data"] = t["data"].map(dict(DATASETS))
     md.append("Empty cell: too few devices are still under observation on that day.\n")
@@ -151,7 +151,7 @@ def calibration(md):
             r = e[(e.dataset == ds) & (e.gran == lv)]
             if r.empty:
                 if lv != "port" and (ds, ds_name) in PORT_ONLY:
-                    ax.text(0.04, i, "port level only", color=MUTED, fontsize=6.5, va="center")
+                    ax.text(1.08, i, "port level only", color=MUTED, fontsize=6.5, va="center")
                 continue
             r = r.iloc[0]
             ax.plot([r.dev_med_lo, r.dev_med_hi], [i - 0.12, i - 0.12], color=BLUE, lw=1.2, solid_capstyle="round")
@@ -190,16 +190,22 @@ def discrimination(md):
                 continue
             r = r.iloc[0]
             a, b = r.fixed14_viol_where_gtc_certified, r.fixed14_viol_where_gtc_refused
-            if pd.notna(a) and pd.notna(b):
+            close = pd.notna(a) and pd.notna(b) and abs(a - b) < 0.055      # the two marks would hide each other
+            ya, yb = (i - 0.13, i + 0.13) if close else (i, i)
+            if pd.notna(a) and pd.notna(b) and not close:
                 ax.plot([a, b], [i, i], color=GRID, lw=1.6, solid_capstyle="round", zorder=1)
             if pd.notna(a):
-                ax.plot(a, i, marker="o", ms=5, color=BLUE, mec="white", mew=0.6, zorder=3,
+                ax.plot(a, ya, ls="none", marker="o", ms=5, color=BLUE, mec="white", mew=0.6, zorder=3,
                         label="episodes that GT-C enforced" if (i == 0 and lv == "port") else None)
             if pd.notna(b):
-                ax.plot(b, i, marker="s", ms=5, color=ORANGE, mec="white", mew=0.6, zorder=3,
+                ax.plot(b, yb, ls="none", marker="s", ms=5, color=ORANGE, mec="white", mew=0.6, zorder=3,
                         label="episodes that GT-C did not enforce" if (i == 0 and lv == "port") else None)
-                ax.annotate(f"n={int(r.n_refused)}", (b, i), xytext=(0, -7), textcoords="offset points", ha="center", va="top",
-                            fontsize=6, color=MUTED)
+                if close:
+                    ax.annotate(f"n={int(r.n_refused)}", (b, yb), xytext=(7, 0), textcoords="offset points", ha="left", va="center",
+                                fontsize=6, color=MUTED)
+                else:
+                    ax.annotate(f"n={int(r.n_refused)}", (b, yb), xytext=(0, -7), textcoords="offset points",
+                                ha="left" if b < 0.06 else "center", va="top", fontsize=6, color=MUTED)
             rows.append((ds_name, lv, int(r.episodes), int(r.both), a, int(r.n_refused), b, r.fixed14_violA_where_gtc_refused))
         ax.set_xlim(-0.04, 1.04)
         ax.set_xticks([0, 0.25, 0.5, 0.75, 1])
@@ -252,9 +258,11 @@ def risk_coverage(md):
         axes[a][0].set_ylabel(f"{lv} level\nexceedance (percent)")
         axes[a][0].set_yticks([0, 0.25, 0.5] if lv == "svc" else [0, 0.25, 0.5, 0.75, 1])
         axes[a][0].set_yticklabels(["0", "25", "50"] if lv == "svc" else ["0", "25", "50", "75", "100"])
-    fig.supxlabel("learning episodes enforced (percent)", fontsize=8, y=0.02)
-    fig.legend(*axes[0][0].get_legend_handles_labels(), loc="upper center", ncol=3, bbox_to_anchor=(0.5, 1.04),
-               handletextpad=0.3, columnspacing=1.6)
+    fig.supxlabel("learning episodes enforced (percent)", fontsize=8, y=0.0)
+    handles, labels = axes[0][0].get_legend_handles_labels()
+    handles.append(plt.Line2D([], [], ls="none", marker="o", ms=6.5, color=MUTED, mec="white", mew=0.9))
+    labels.append("large mark: the rule as used (target 0.3, day 14)")
+    fig.legend(handles, labels, loc="upper center", ncol=4, bbox_to_anchor=(0.5, 1.04), handletextpad=0.3, columnspacing=1.4)
     save(fig, "fig_risk_coverage")
     t = pd.DataFrame(rows, columns=["data", "level", "rule", "threshold", "enforced share", "median day", "exceedance", "the same for the type rate"])
     md.append("## Figure: exceedance against the share of episodes enforced (target 0.3, next 14 active days)\n")
@@ -314,12 +322,21 @@ def fleet(md):
     fig, axes = plt.subplots(1, 2, figsize=(7.1, 2.4), gridspec_kw={"width_ratios": [1.25, 1]})
     ax = axes[0]
     ks = [1, 2, 3, 5, 8, 11]
+    ends = []
     for lv in order:
-        color, marker = LEVEL_STYLE[lv] if lv != "net" else (BLUE, "^")
+        color, marker = LEVEL_STYLE[lv]
         d = c[(c.gran == lv) & c.k.isin(ks)].sort_values("k")
-        ax.plot(d.k, d.type_cov_mean, color=color, lw=1.6, marker=marker, ms=4.5, mec="white", mew=0.6)
-        last = d.iloc[-1]
-        ax.annotate(lv, (last.k, last.type_cov_mean), xytext=(6, 0), textcoords="offset points", va="center", fontsize=7.5, color=INK)
+        if lv == "host":                                            # the finest level: same hue as net, dashed, open marks
+            ax.plot(d.k, d.type_cov_mean, color=color, lw=1.2, ls=(0, (4, 2)), marker=marker, ms=4, mfc="white", mec=color, mew=0.9)
+        else:
+            ax.plot(d.k, d.type_cov_mean, color=color, lw=1.6, marker=marker, ms=4.5, mec="white", mew=0.6)
+        ends.append([lv, d.iloc[-1].k, d.iloc[-1].type_cov_mean])
+    ends.sort(key=lambda e: -e[2])
+    ys = [e[2] for e in ends]
+    for j in range(1, len(ys)):                                     # labels at least one line apart
+        ys[j] = min(ys[j], ys[j - 1] - 0.045)
+    for (lv, k, _), y in zip(ends, ys):
+        ax.annotate(lv, (k, y), xytext=(6, 0), textcoords="offset points", va="center", fontsize=7.5, color=INK)
     ax.set_xticks(ks)
     ax.set_xticklabels(["1", "2", "3", "5", "8", "11"])
     ax.set_xlim(0.5, 12.6)
@@ -335,8 +352,10 @@ def fleet(md):
     for i, lv in enumerate(order):
         r = v[v.gran == lv].iloc[0]
         ax.plot([r.fleet, r.solo], [i, i], color=GRID, lw=1.6, solid_capstyle="round", zorder=1)
-        ax.plot(r.solo, i, marker="s", ms=5, color=ORANGE, mec="white", mew=0.6, zorder=3, label="each home alone" if i == 0 else None)
-        ax.plot(r.fleet, i, marker="o", ms=5, color=BLUE, mec="white", mew=0.6, zorder=3, label="one list for all homes" if i == 0 else None)
+        ax.plot(r.solo, i, ls="none", marker="s", ms=5, color=ORANGE, mec="white", mew=0.6, zorder=3,
+                label="a list per home" if i == 0 else None)
+        ax.plot(r.fleet, i, ls="none", marker="o", ms=5, color=BLUE, mec="white", mew=0.6, zorder=3,
+                label="one list for all homes" if i == 0 else None)
         ax.annotate(f"{r.reduction:.1f} times fewer", (r.fleet, i), xytext=(0, 7), textcoords="offset points", ha="left", va="bottom",
                     fontsize=6.5, color=MUTED)
     ax.set_xscale("log")
@@ -344,8 +363,9 @@ def fleet(md):
     ax.set_xticks([0.01, 0.1, 1, 10])
     ax.set_xticklabels(["0.01", "0.1", "1", "10"])
     rows_axis(ax, order, "new flow types per device and day")
-    ax.legend(loc="lower right", fontsize=7, handletextpad=0.3)
-    fig.subplots_adjust(wspace=0.32)
+    ax.set_ylim(len(order) - 0.05, -0.5)                             # room for the legend below the last row
+    ax.legend(loc="lower left", fontsize=7, handletextpad=0.1, borderaxespad=0.6)
+    fig.subplots_adjust(wspace=0.42)
     save(fig, "fig_fleet")
     md.append("## Figure: one list for all homes that run the same device model (12 homes)\n")
     md.append("Left: a list is built from k homes and judged on a further home that runs the same device model (device models "
@@ -381,7 +401,7 @@ def capture_length(md):
         ax.grid(axis="y", color=GRID, lw=0.5)
         ax.set_axisbelow(True)
     axes[0][0].set_ylabel("devices that can be\nevaluated (percent)")
-    fig.supxlabel("length of the capture (active days of the device)", fontsize=8, y=-0.06)
+    fig.supxlabel("length of the capture (active days of the device)", fontsize=8, y=-0.10)
     fig.legend(*axes[0][0].get_legend_handles_labels(), loc="upper center", ncol=2, bbox_to_anchor=(0.5, 1.13),
                handletextpad=0.3, columnspacing=1.6)
     save(fig, "fig_capture_length")

@@ -262,5 +262,89 @@ class ChainTests(unittest.TestCase):
         self.assertEqual({r["rule"] for r in self.table("time_uniform")}, {"GT-C", "GT-C every look, daily", "GT-C every look, weekly"})
 
 
+class ReplicationTests(unittest.TestCase):
+    """Three synthetic captures through the two-part chain of run_sens.sh: one that is long enough, one whose part 2 holds
+    too few days with records, and one whose part 1 holds too few days for any learning episode that can be evaluated."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        d = cls.d = cls.tmp.name
+        rng = np.random.default_rng(5)
+        spans = {"full": list(range(150)), "short2": list(range(56)) + list(range(56, 86)) + list(range(112, 140)),
+                 "gap1": list(range(18)) + list(range(56, 150))}
+        rows, cov = [], []
+        for ds, days in spans.items():
+            cov += [(ds, D0 + datetime.timedelta(days=i)) for i in days]
+            for dev in range(5):
+                p = np.concatenate([np.full(4, 0.95), rng.uniform(0.02, 0.5, 4), rng.uniform(0.002, 0.02, 8)])
+                for i in days:
+                    for t in np.nonzero(rng.random(len(p)) < p)[0]:
+                        rows.append((ds, "a", f"dev{dev}", D0 + datetime.timedelta(days=i), "svc", f"t{t}", int(1 + t)))
+        write_inc(f"{d}/inc.parquet", rows)
+        with open(f"{d}/cov.csv", "w") as f:
+            f.write("dataset,site,day,hours\n" + "".join(f"{ds},a,{day},24.0\n" for ds, day in cov))
+        run(f"{A}/sens_units.py", f"{d}/cov.csv", f"{d}/sens", f"{d}/inc.parquet")
+        for v in ("part1", "part2"):
+            r = f"{d}/sens/{v}/res"
+            os.makedirs(r)
+            run(f"{A}/run_series3.py", f"{d}/sens/{v}/inc_day.parquet", r, env={"GT_GRANS": "svc"})
+            run("-c", f"import sys, pandas as pd; sys.path.insert(0, r'{A}'); import scores; "
+                      f"scores.add_scores(pd.read_parquet(r'{r}/series.parquet')).to_parquet(r'{r}/scored.parquet', index=False)")
+            run(f"{A}/eval_all3.py", r, "14", "7")
+            run(f"{A}/extra.py", r, "14")
+            run(f"{A}/fixed_list.py", f"{d}/sens/{v}/inc_day.parquet", r)
+        run(f"{A}/halves.py", f"{d}/sens/part1", f"{d}/sens/part2", f"{d}/out")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def rows(self, name, ds):
+        return [r for r in read_csv(f"{self.d}/out/{name}.csv") if r["dataset"] == ds]
+
+    def test_a_long_capture_is_analysed_in_both_parts(self):
+        t = {r["rule"]: r for r in self.rows("halves_table", "full")}
+        self.assertEqual(sorted(t), ["GT-C", "fixed 14", "quiet streak"])
+        for n in ("1", "2"):
+            seq = {r["rule"]: r for r in read_csv(f"{self.d}/sens/part{n}/res/tables/sequential_H14.csv")
+                   if r["dataset"] == "full" and float(r["eps"]) == 0.3}
+            for rule, r in t.items():
+                self.assertEqual(r["status"], "analysed")
+                self.assertEqual(int(r[f"days{n}"]), 56)
+                self.assertEqual(int(float(r[f"episodes{n}"])), int(float(seq[rule]["episodes"])))
+                self.assertAlmostEqual(float(r[f"stopped{n}"]), float(seq[rule]["stopped"]))
+        self.assertEqual(float(t["fixed 14"]["stopped1"]), 1.0)
+        self.assertEqual(int(float(t["GT-C"]["dev_both"])), 5)
+
+    def test_the_two_by_two_table_covers_every_device(self):
+        (r,) = self.rows("halves_devices", "full")
+        self.assertEqual(int(r["devices"]), 5)
+        self.assertEqual(sum(int(r[k]) for k in ("both", "only_part1", "only_part2", "neither")), 5)
+
+    def test_a_list_that_is_never_updated_alerts_at_least_as_often(self):
+        (r,) = self.rows("halves_ageing", "full")
+        self.assertGreaterEqual(int(r["devices"]), 1)
+        self.assertGreaterEqual(float(r["never_rate_mean"]), float(r["once_rate_mean"]))
+        self.assertLessEqual(float(r["never_rate_mean"]), 1.0)
+
+    def test_a_short_second_part_is_not_analysed(self):
+        t = self.rows("halves_table", "short2")
+        self.assertEqual(len(t), 3)
+        for r in t:
+            self.assertTrue(r["status"].startswith("part 2 has fewer than 42 days"))
+            self.assertEqual((int(r["days1"]), int(r["days2"])), (56, 30))
+            self.assertEqual(r["episodes1"] + r["episodes2"] + r["violA1"] + r["violA2"], "")
+        self.assertEqual(self.rows("halves_devices", "short2"), [])
+        self.assertEqual(self.rows("halves_ageing", "short2"), [])
+
+    def test_a_first_part_without_an_evaluable_episode_is_named(self):
+        for r in self.rows("halves_table", "gap1"):
+            self.assertEqual(r["status"], "no learning episode can be evaluated in part 1")
+            self.assertEqual((int(r["days1"]), int(r["days2"])), (18, 56))
+            self.assertEqual(r["episodes1"], "")
+            self.assertGreater(int(float(r["episodes2"])), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
