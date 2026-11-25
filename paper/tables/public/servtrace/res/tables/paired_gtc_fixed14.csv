@@ -1,0 +1,3 @@
+dataset,gran,episodes,gtc_certified,fixed14,both,fixed14_viol_where_gtc_certified,gtc_viol_same,fixed14_viol_where_gtc_refused,n_refused,fixed14_violA_where_gtc_refused
+servtrace19,port,312,282,308,280,0.125,0.05357142857142857,0.8571428571428571,28,0.5
+servtrace22,port,836,741,794,715,0.03636363636363636,0.02937062937062937,0.8607594936708861,79,0.5569620253164557

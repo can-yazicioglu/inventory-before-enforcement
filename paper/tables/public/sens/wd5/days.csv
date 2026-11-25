@@ -1,0 +1,8 @@
+variant,dataset,days_all,device_days_all,days,device_days,days_removed,device_days_removed
+wd5,deakin,121,1602,87,1155,34,447
+wd5,homes,437,7965,315,5743,122,2222
+wd5,servtrace19,467,6807,337,4985,130,1822
+wd5,servtrace22,364,18002,260,12897,104,5105
+wd5,unsw,178,2058,125,1456,53,602
+wd5,unsw25v1,85,2488,63,1851,22,637
+wd5,unsw25v2,240,5399,174,3933,66,1466

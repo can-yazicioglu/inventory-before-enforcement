@@ -26,10 +26,13 @@ import sys, pandas as pd
 sys.path.insert(0,'$A'); import scores
 scores.add_scores(pd.read_parquet('$R/series.parquet')).to_parquet('$R/scored.parquet', index=False)" || { echo FAIL score $v; continue; }
   python3 -I -W ignore $A/eval_all3.py $R 14 7 > $R/eval14.log 2>&1 || echo FAIL eval $v
-  case $v in part*) python3 -I -W ignore $A/extra.py $R 14 > $R/extra.log 2>&1 || echo FAIL extra $v;; esac   # calibration of each part
+  # calibration without partial recording days and of each part (the same three variants that the pattern part* selected)
+  case $v in partial20|part1|part2) python3 -I -W ignore $A/extra.py $R 14 > $R/extra.log 2>&1 || echo FAIL extra $v;; esac
   python3 -I -W ignore $A/fixed_list.py $S/$v/inc_day.parquet $R > $R/fixed_list.log 2>&1 || echo FAIL fixed_list $v
   echo "done $v $(date +%H:%M)"
 done
 python3 -I -W ignore $A/sens_table.py $D > $D/out/sens_table.log 2>&1 || echo FAIL sens_table
 python3 -I -W ignore $A/halves.py $S/part1 $S/part2 $D/out > $D/out/halves.log 2>&1 || echo FAIL halves
+# (4) a check that reads stored tables only: the stopping tables of the second program against those of the analysis
+python3 -I $A/indep_compare.py $D/v3/res_base $D/val/res $D/servtrace/res ${DK:+$D/deakin/res} > $D/out/indep_compare.log 2>&1 || echo FAIL indep_compare
 echo SENSDONE

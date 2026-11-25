@@ -11,6 +11,7 @@ named by the environment variable `IBE_DATA` (default `data/`).
 | `hvac` | Building automation (HVAC) control network trace. Kabasele Ndonda and Sadre, "A Public Network Trace of a Control and Automation System", arXiv:1908.02118, 2019. Data: https://github.com/gkabasele/HVAC_Traces | flows derived from the packet trace | 37 internal nodes, 7 days, 126,104 flows | Europe/Brussels |
 | `cic` | CICIoMT2024. Dadkhah, Neto, Ferreira, Molokwu, Sadeghi and Ghorbani, "CICIoMT2024: A benchmark dataset for multi-protocol security assessment in IoMT", Internet of Things 28, 101351, 2024, doi:10.1016/j.iot.2024.101351 | packet captures (idle, active, benign, power-on, user interaction, reconnaissance) of the seven Wi-Fi devices | used for the evaluation of device states and reconnaissance, and for the recorder tests | n/a |
 | `servtrace19`, `servtrace22` | IoT-ServTrace. Azizi, Okui, Nakahara, Kubota and Habibi Gharakheili, "Backend-Service Fingerprints: Lightweight and Interpretable Identification of Household IoTs", IFIP Networking 2026. Data: https://github.com/shay-fi/IoT-ServTrace (MIT) | time, transport and port of each flow to a service outside the home network | 19 devices from June 2019 to October 2020 (15.5 million flows) and 52 devices over 2022 (34.3 million flows). Port level only: no remote address and no direction | Asia/Tokyo |
+| `deakin` | Deakin IoT Traffic (D-IoT). Pasquini and co-authors, data descriptor doi:10.1109/IEEEDATA.2025.3549716. Data: Deakin University, doi:10.26187/deakin.28013234 (CC BY 4.0) | the packet captures of the IoT devices (folder `pcapIoT`, 119 daily files), reduced to flow records by `analysis/deakin_reduce.py`, and the list of MAC addresses | 24 devices, 121 local days with records between May 2023 and May 2024 (381 calendar days), 112,844,851 packets, 3,000,174 flow records. The captures hold only the packets that the devices sent | Australia/Melbourne |
 
 Full bibliographic references of all sources are given in the paper. The first and the last
 calendar day of every device are dropped, and all timestamps are UTC in the prepared files.
@@ -19,7 +20,10 @@ Recording days. The UNSW 2016 trace has 178 recording days in 204 calendar days,
 less than 20 hours. Every day file of UNSW 2025 runs up to two minutes past local midnight. A record
 is therefore never placed on a later local day than its file (correction of 24 November 2026, see
 `method.md`). Three of the 85 recording days of the first release and two of the 240 of the second
-cover less than 20 hours (`analysis/facts.py`, section 8).
+cover less than 20 hours (`analysis/facts.py`, section 8). The table of all captures is written by
+`analysis/coverage.py` (`paper/tables/public/sens/coverage_summary.csv`). The Deakin trace was recorded in
+seven batches with gaps of up to 203 days between them. In two of its daily files (18 and 19 July 2023)
+the packets are not in time order, and `deakin_reduce.py` reads the packets in file order.
 
 Clinical data are not public. What may be published from a site is fixed by that site's written
 permission and the ethics approval.

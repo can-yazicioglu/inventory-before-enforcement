@@ -1,0 +1,9 @@
+dataset,gran,episodes,gtc_certified,fixed14,both,fixed14_viol_where_gtc_certified,gtc_viol_same,fixed14_viol_where_gtc_refused,n_refused,fixed14_violA_where_gtc_refused
+servtrace19,port,28,19,28,19,0.05263157894736842,0.05263157894736842,0.7777777777777778,9,0.3333333333333333
+servtrace22,port,99,82,92,81,0.07407407407407407,0.07407407407407407,0.7272727272727273,11,0.5454545454545454
+unsw,net,25,5,13,4,0.25,0.25,1.0,9,0.7777777777777778
+unsw,port,25,14,13,10,0.0,0.0,0.6666666666666666,3,0.0
+unsw,svc,25,11,13,8,0.0,0.0,0.8,5,0.4
+unsw25v2,net,15,5,9,5,0.0,0.0,0.75,4,0.75
+unsw25v2,port,15,13,9,9,0.0,0.0,,0,
+unsw25v2,svc,15,12,9,8,0.0,0.0,0.0,1,0.0

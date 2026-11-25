@@ -1,0 +1,64 @@
+dataset,gran,eps,rule,episodes,stopped,med_T,viol,violA
+deakin,net,0.1,GT-UCB,64,0.1875,35.0,0.0,0.0
+deakin,net,0.1,GT-C,64,0.1875,46.0,0.0,0.0
+deakin,net,0.1,quiet streak,64,0.2344,44,0.0667,0.0
+deakin,net,0.1,fixed 7,64,1.0,7.0,0.8125,0.7812
+deakin,net,0.1,fixed 14,64,0.875,14.0,0.75,0.6429
+deakin,net,0.1,fixed 21,64,0.7656,21,0.6939,0.6531
+deakin,net,0.1,fixed 28,64,0.7188,28.0,0.6304,0.587
+deakin,net,0.3,GT-UCB,64,0.4219,16,0.0,0.0
+deakin,net,0.3,GT-C,64,0.4062,21.0,0.0385,0.0
+deakin,net,0.3,quiet streak,64,0.4688,19.0,0.1667,0.0667
+deakin,net,0.3,fixed 7,64,1.0,7.0,0.6562,0.4844
+deakin,net,0.3,fixed 14,64,0.875,14.0,0.5357,0.4286
+deakin,net,0.3,fixed 21,64,0.7656,21,0.5102,0.4286
+deakin,net,0.3,fixed 28,64,0.7188,28.0,0.5,0.4348
+deakin,net,1.0,GT-UCB,64,0.6719,10,0.1163,0.0
+deakin,net,1.0,GT-C,64,0.6562,10.0,0.119,0.0
+deakin,net,1.0,quiet streak,64,0.6875,9.0,0.1364,0.0
+deakin,net,1.0,fixed 7,64,1.0,7.0,0.4688,0.0
+deakin,net,1.0,fixed 14,64,0.875,14.0,0.3393,0.0
+deakin,net,1.0,fixed 21,64,0.7656,21,0.3673,0.0
+deakin,net,1.0,fixed 28,64,0.7188,28.0,0.3478,0.0
+deakin,port,0.1,GT-UCB,64,0.4219,37,0.1481,0.0741
+deakin,port,0.1,GT-C,64,0.3906,40,0.16,0.08
+deakin,port,0.1,quiet streak,64,0.4688,38.5,0.1,0.0667
+deakin,port,0.1,fixed 7,64,1.0,7.0,0.2969,0.1875
+deakin,port,0.1,fixed 14,64,0.875,14.0,0.25,0.0714
+deakin,port,0.1,fixed 21,64,0.7656,21,0.2041,0.1224
+deakin,port,0.1,fixed 28,64,0.7188,28.0,0.1739,0.0652
+deakin,port,0.3,GT-UCB,64,0.8281,16,0.0943,0.0
+deakin,port,0.3,GT-C,64,0.7969,16,0.0588,0.0
+deakin,port,0.3,quiet streak,64,0.8438,16.0,0.0926,0.0
+deakin,port,0.3,fixed 7,64,1.0,7.0,0.1406,0.0156
+deakin,port,0.3,fixed 14,64,0.875,14.0,0.0357,0.0
+deakin,port,0.3,fixed 21,64,0.7656,21,0.102,0.0
+deakin,port,0.3,fixed 28,64,0.7188,28.0,0.0652,0.0
+deakin,port,1.0,GT-UCB,64,0.9688,7.0,0.0,0.0
+deakin,port,1.0,GT-C,64,0.9688,7.0,0.0,0.0
+deakin,port,1.0,quiet streak,64,0.9844,7,0.0,0.0
+deakin,port,1.0,fixed 7,64,1.0,7.0,0.0,0.0
+deakin,port,1.0,fixed 14,64,0.875,14.0,0.0,0.0
+deakin,port,1.0,fixed 21,64,0.7656,21,0.0204,0.0
+deakin,port,1.0,fixed 28,64,0.7188,28.0,0.0,0.0
+deakin,svc,0.1,GT-UCB,64,0.25,30.0,0.0625,0.0
+deakin,svc,0.1,GT-C,64,0.25,30.0,0.0625,0.0
+deakin,svc,0.1,quiet streak,64,0.3438,39.0,0.1364,0.0909
+deakin,svc,0.1,fixed 7,64,1.0,7.0,0.5,0.3906
+deakin,svc,0.1,fixed 14,64,0.875,14.0,0.4464,0.2857
+deakin,svc,0.1,fixed 21,64,0.7656,21,0.4082,0.3469
+deakin,svc,0.1,fixed 28,64,0.7188,28.0,0.3696,0.2826
+deakin,svc,0.3,GT-UCB,64,0.625,10.0,0.075,0.0
+deakin,svc,0.3,GT-C,64,0.5938,16.0,0.0789,0.0
+deakin,svc,0.3,quiet streak,64,0.7344,17,0.1064,0.0
+deakin,svc,0.3,fixed 7,64,1.0,7.0,0.375,0.2031
+deakin,svc,0.3,fixed 14,64,0.875,14.0,0.25,0.1964
+deakin,svc,0.3,fixed 21,64,0.7656,21,0.2857,0.1633
+deakin,svc,0.3,fixed 28,64,0.7188,28.0,0.2391,0.1739
+deakin,svc,1.0,GT-UCB,64,0.8438,7.0,0.0185,0.0
+deakin,svc,1.0,GT-C,64,0.8438,7.0,0.0185,0.0
+deakin,svc,1.0,quiet streak,64,0.875,7.0,0.0536,0.0
+deakin,svc,1.0,fixed 7,64,1.0,7.0,0.1875,0.0
+deakin,svc,1.0,fixed 14,64,0.875,14.0,0.1786,0.0
+deakin,svc,1.0,fixed 21,64,0.7656,21,0.1633,0.0
+deakin,svc,1.0,fixed 28,64,0.7188,28.0,0.1087,0.0

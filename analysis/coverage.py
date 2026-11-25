@@ -7,7 +7,7 @@ A capture is a (dataset, site) pair of the common schema: a trace, and in the 12
 Sources are given as  kind|path|time zone :
   norm|<parquet file or glob in the common schema>|<IANA zone>     normalised records (column ts in UTC)
   servtrace|<dir with IoT-ServTrace-2019 and IoT-ServTrace-2022>|<IANA zone>   the JSON files of IoT-ServTrace
-Output: dataset, site, day, first, last, hours, records, partial.
+Output: dataset, site, day, first, last, hours, records, partial. A second file, <out>_summary.csv, has one row per capture.
 Usage: coverage.py <out.csv> <source>..."""
 import sys, os, duckdb
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import reglib
@@ -34,4 +34,5 @@ c.to_csv(outp, index=False)
 g = c.groupby(['dataset', 'site']).agg(recording_days=('day', 'size'), partial_days=('partial', 'sum'), first_day=('day', 'min'),
                                        last_day=('day', 'max'), median_hours=('hours', 'median')).reset_index()
 g['calendar_days'] = [(b - a).days + 1 for a, b in zip(g.first_day, g.last_day)]
+g.to_csv(os.path.splitext(outp)[0] + '_summary.csv', index=False)     # one row per capture
 print(g.to_string(index=False))

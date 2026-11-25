@@ -13,12 +13,13 @@ The frozen method (`../docs/method.md`) as code. Python 3 with duckdb, pandas, n
 | describe | `facts.py`, `exp1.py`, `exp4.py`, `exp5.py`, `exp6.py` | the descriptive numbers of the text, exchangeability test, device categories, fleet learning, sampling unit |
 | other data | `pcap2flows.py`, `cic_eval.py`, `adapt_servtrace.py`, `deakin_reduce.py`, `adapt_deakin.py` | CICIoMT2024 (device states, reconnaissance), IoT-ServTrace (port level only), Deakin D-IoT (packets sent by the devices only) |
 | registered on 25 Nov 2026 | `rules_eval.py`, `coverage.py`, `sens_units.py`, `sens_table.py`, `halves.py`, `reglib.py` | allowlists from flow types seen on at least k days, a bound that is valid at every look, the analysis without partial recording days and on weekdays only, the replication within one recording |
-| check | `verify.py`, `indep.py`, `indep_unsw.py`, `prop_check.py` | brute-force recount of the inputs, a second program for the stopping tables (see below), exact check of the propositions |
+| check | `verify.py`, `indep.py`, `indep_compare.py`, `indep_unsw.py`, `prop_check.py` | brute-force recount of the inputs, a second program for the stopping tables and its comparison with the stored tables (see below), exact check of the propositions |
 
 Run order and time zones are recorded in `run_prep.sh`, `run_v3.sh`, `run_final_base.sh`, `run_val.sh` and `run_extra.sh`, in
 this order. `run_cic.sh`, `run_servtrace.sh` and `run_deakin.sh` are independent of them. `run_sens.sh` comes last: it runs the
 analyses registered on 25 November 2026 on all traces. Every number quoted in the text comes from a table or a log that one of
-these scripts writes.
+these scripts writes. `collect_tables.sh` then copies the stored tables into `../paper/tables/public`, so that the numbers of the
+public-data results can be read, and compared between two runs, without the data.
 
 The second program (`indep.py`) recomputes the enforcement days and the two exceedance shares of GT-C, of the chi-square limit
 alone, of the quiet streak and of the fixed windows for the 14-day horizon at the port, svc and net levels. It uses sets and

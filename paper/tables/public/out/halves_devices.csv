@@ -1,0 +1,6 @@
+dataset,gran,devices,both,only_part1,only_part2,neither,agree,day_diff_median,day_diff_q25,day_diff_q75
+servtrace19,port,13,8,1,0,4,0.9230769230769231,0.0,0.0,0.75
+servtrace22,port,48,42,4,0,2,0.9166666666666666,0.0,0.0,0.0
+unsw25v2,port,9,7,2,0,0,0.7777777777777778,0.0,0.0,7.0
+unsw25v2,svc,9,7,1,0,1,0.8888888888888888,0.0,0.0,7.0
+unsw25v2,net,9,3,2,0,4,0.7777777777777778,0.0,-1.0,6.5
