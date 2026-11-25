@@ -11,12 +11,21 @@ The frozen method (`../docs/method.md`) as code. Python 3 with duckdb, pandas, n
 | 5 | `scores.py` | Good-Turing estimate, upper bound, drift correction (GT-C) |
 | 6 | `eval_all3.py`, `extra.py`, `alertday.py`, `matched.py`, `capture_len.py`, `hvac_cal.py` | calibration, the stopping rules, alert-day metric, cluster bootstrap, how long a capture must be |
 | describe | `facts.py`, `exp1.py`, `exp4.py`, `exp5.py`, `exp6.py` | the descriptive numbers of the text, exchangeability test, device categories, fleet learning, sampling unit |
-| other data | `pcap2flows.py`, `cic_eval.py`, `adapt_servtrace.py` | CICIoMT2024 (device states, reconnaissance), IoT-ServTrace (port level only) |
-| check | `verify.py`, `indep.py`, `indep_unsw.py`, `prop_check.py` | brute-force recount of the inputs, a second implementation written from the method text, exact check of the propositions |
+| other data | `pcap2flows.py`, `cic_eval.py`, `adapt_servtrace.py`, `deakin_reduce.py`, `adapt_deakin.py` | CICIoMT2024 (device states, reconnaissance), IoT-ServTrace (port level only), Deakin D-IoT (packets sent by the devices only) |
+| registered on 25 Nov 2026 | `rules_eval.py`, `coverage.py`, `sens_units.py`, `sens_table.py`, `halves.py`, `reglib.py` | allowlists from flow types seen on at least k days, a bound that is valid at every look, the analysis without partial recording days and on weekdays only, the replication within one recording |
+| check | `verify.py`, `indep.py`, `indep_unsw.py`, `prop_check.py` | brute-force recount of the inputs, a second program for the stopping tables (see below), exact check of the propositions |
 
-Run order and time zones are recorded in `run_v3.sh`, `run_final_base.sh`, `run_val.sh` and `run_extra.sh`, in this order.
-`run_cic.sh` and `run_servtrace.sh` are independent of them. Every number quoted in the text comes from a table or a log
-that one of these scripts writes.
+Run order and time zones are recorded in `run_prep.sh`, `run_v3.sh`, `run_final_base.sh`, `run_val.sh` and `run_extra.sh`, in
+this order. `run_cic.sh`, `run_servtrace.sh` and `run_deakin.sh` are independent of them. `run_sens.sh` comes last: it runs the
+analyses registered on 25 November 2026 on all traces. Every number quoted in the text comes from a table or a log that one of
+these scripts writes.
+
+The second program (`indep.py`) recomputes the enforcement days and the two exceedance shares of GT-C, of the chi-square limit
+alone, of the quiet streak and of the fixed windows for the 14-day horizon at the port, svc and net levels. It uses sets and
+loops instead of matrices, starts from the same table of flow types per device and day and follows the same conventions. It
+checks the computation of the rule and of the outcomes, not the preparation of the data. The preparation of the UNSW 2016 data
+was repeated separately (`indep_unsw.py`). Intervals, calibration, the certification curves and the other tables were not
+recomputed independently.
 Paths come from the environment variable `IBE_DATA` (default `data/`).
 
 ## Clinical sites

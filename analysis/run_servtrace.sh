@@ -17,4 +17,5 @@ python3 -I -W ignore $A/matched.py $S/res/matched_streak.csv $S/res/scored.parqu
 python3 -I -W ignore $A/capture_len.py $S/res/capture_length.csv $S/res/scored.parquet > $S/res/capture_len.log 2>&1
 python3 -I $A/indep.py $S/inc/inc_day.parquet $S/res/indep 14 > $S/res/indep.log 2>&1
 python3 -I -W ignore $A/fixed_list.py $S/inc/inc_day.parquet $S/res > $S/res/fixed_list.log 2>&1
+python3 -I -W ignore $A/exch_table.py $S/res/exchangeability.csv $S/res > $S/res/exch_table.log 2>&1
 echo SERVTRACEDONE

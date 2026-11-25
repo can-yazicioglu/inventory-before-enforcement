@@ -11,6 +11,7 @@ python3 -I -W ignore $A/capture_len.py $D/out/capture_length.csv $D3/res_base/sc
 python3 -I -W ignore $A/eval_all3.py $DV/res_hvac_6h 14 7 > $DV/res_hvac_6h/eval14.log 2>&1 || echo FAIL eval hvac
 python3 -I -W ignore $A/hvac_cal.py $DV $D/out/hvac_calibration_explicit.csv > $D/out/hvac_cal.log 2>&1 || echo FAIL hvac_cal
 python3 -I -W ignore $A/facts.py > $D/out/facts.log 2>&1 || echo FAIL facts
+python3 -I -W ignore $A/exch_table.py $D/out/exchangeability.csv $D3/res_base $DV/res > $D/out/exch_table.log 2>&1 || echo FAIL exch_table
 python3 -I -W ignore $A/fixed_list.py $D3/inc_base/inc_day.parquet $D3/res_base > $D3/res_base/fixed_list.log 2>&1 || echo FAIL fixed_list base
 python3 -I -W ignore $A/fixed_list.py $DV/inc/inc_day.parquet $DV/res > $DV/res/fixed_list.log 2>&1 || echo FAIL fixed_list val
 python3 -I $A/prop_check.py > $D/out/prop_check.log 2>&1 || echo FAIL prop_check

@@ -32,7 +32,7 @@ The full definitions, the parameters and the three expectations written down in 
 ## Status
 
 - Method and metrics are frozen. Changes are only made as dated notes in `docs/method.md`.
-- The analysis runs on five public data sources, and on a sixth at the port level only (see [`docs/data.md`](docs/data.md)). Every stored table was reproduced from scratch. The tables of the stopping rules were also recomputed by a second implementation written from the method text alone.
+- The analysis runs on five public data sources, and on a sixth at the port level only (see [`docs/data.md`](docs/data.md)). Every stored table was reproduced from scratch. The enforcement days and the exceedance shares in the tables of the stopping rules were also recomputed by a second program (14-day horizon, port, svc and net levels). It starts from the same table of flow types per device and day, so it checks the computation of the rule and not the preparation of the data (see [`analysis/README.md`](analysis/README.md)).
 - The recorder is implemented and tested end to end on real traffic (see below). Recording at clinical sites starts only after ethics approval.
 
 ## Quick check
