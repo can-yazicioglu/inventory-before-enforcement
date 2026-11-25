@@ -5,7 +5,7 @@ hash (UNSW 2025 v1) are found by name and the joined file is checked against its
 pcap parts: the 24-byte global header of every part but the first is dropped. zip and parquet parts: plain concatenation.
 A part stored gzip-compressed (protocols.zip.part004.gz) is matched by the hash of its decompressed content.
 Usage: join.py <manifest_dir> <out_dir> <dir with parts>...
-  manifest_dir holds manifest.json, manifest_hvac.json, manifest_unsw2025.json and manifest_extra.json"""
+  manifest_dir holds manifest.json, manifest_hvac.json, manifest_unsw2025.json and manifest_extra.json (or manifest_ek.json)"""
 import sys, os, json, gzip, hashlib, re, shutil
 mdir, out = sys.argv[1:3]; roots = sys.argv[3:]
 os.makedirs(out, exist_ok=True)
@@ -22,7 +22,9 @@ for n, i in load('manifest_unsw2025.json').items(): man[n] = i
 ek = load('manifest_extra.json', 'manifest_ek.json')
 for sec in ('owltron_lan', 'protocols', 'unsw2025_v1'):
     for n, i in ek.get(sec, {}).items(): man[n] = i
-single = ek.get('cic_interactions_lan_birlesmis', {})
+single = {}          # files that were uploaded whole: copied under their own name when the hash matches
+for sec in ('cic_interactions_lan_birlesmis', 'cic_power_recon', 'homes_devices'):
+    single.update({n: i for n, i in ek.get(sec, {}).items() if isinstance(i, dict)})
 
 sizes = set()
 for i in man.values():
@@ -30,7 +32,13 @@ for i in man.values():
         if isinstance(p, dict): sizes.add(p['bytes'])
 for i in single.values(): sizes.add(i['bytes'])
 by_hash = {}; by_name = {}
-def norm(s): return re.sub(r'[^A-Za-z0-9]', '', re.sub(r'^[0-9a-f]{8}-', '', s)).lower()
+def norm(s):
+    """File name without the decorations that upload tools add: a leading 8-digit id, a leading
+    'project-file-<uuid>-', and an 8-digit id before the extension."""
+    s = re.sub(r'^project-file-[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}-', '', s)
+    s = re.sub(r'^[0-9a-f]{8}-', '', s)
+    s = re.sub(r'-[0-9a-f]{8}(\.[A-Za-z0-9]+)$', r'\1', s)
+    return re.sub(r'[^A-Za-z0-9]', '', s).lower()
 for r in roots:
     for d, _, fs in os.walk(r):
         for f in fs:
