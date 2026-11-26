@@ -9,7 +9,7 @@ from passive observation, and the open question is when to stop observing. Stop 
 allowlist blocks legitimate traffic. Wait too long and the device stays unprotected.
 
 This repository holds the code of a study that answers the question with a statistical stopping
-rule and tests it on public traces and at clinical sites.
+rule and evaluates it on public traces. A single-site clinical field study is planned; recording has not started.
 
 | Part | What it is |
 |---|---|
@@ -32,8 +32,10 @@ The full definitions, the parameters and the three expectations written down in 
 ## Status
 
 - Method and metrics are frozen. Changes are only made as dated notes in `docs/method.md`.
-- The analysis runs on five public data sources, and on a sixth at the port level only (see [`docs/data.md`](docs/data.md)). Every stored table was reproduced from scratch. The enforcement days and the exceedance shares in the tables of the stopping rules were also recomputed by a second program (14-day horizon, port, svc and net levels). It starts from the same table of flow types per device and day, so it checks the computation of the rule and not the preparation of the data (see [`analysis/README.md`](analysis/README.md)).
-- The recorder is implemented and tested end to end on real traffic (see below). Recording at clinical sites starts only after ethics approval.
+- The analysis uses seven public datasets, with coverage and supported flow granularities varying by source (see [`docs/data.md`](docs/data.md)). Every stored table was reproduced from scratch. The enforcement days and the exceedance shares in the tables of the stopping rules were also recomputed by a second program (14-day horizon, port, svc and net levels). It starts from the same table of flow types per device and day, so it checks the computation of the rule and not the preparation of the data (see [`analysis/README.md`](analysis/README.md)).
+- The recorder is implemented and has software tests and traffic-replay checks (see below). As of 26 November 2026, the Raspberry Pi 5 hardware has arrived, but on-device validation is pending. Written site permission is in place; ethics approval is pending, and clinical recording has not started.
+- The planned field study covers one private eye medical centre for up to sixteen weeks, with a within-site replication. Public-data results are not clinical outcomes.
+- GT-C did not outperform the simpler quiet-days rule in the audited comparison. Results depend on alert definition and flow granularity; a strict unchanged-allowlist measure is reported alongside the primary first-discovery measure. See the dated limitations and amendments in `docs/method.md`.
 
 ## Quick check
 
