@@ -293,20 +293,3 @@ roughly twice the cost. In the kernel series of the Raspberry Pi used here (6.12
 on-board Ethernet driver (macb) nor the RTL8125 driver (r8169) supports native XDP, so the
 enforcement cost we report is that of the portable nftables kernel path and is a conservative upper
 bound relative to accelerated data planes.
-
-## Open points before submission
-
-- "roughly twice the cost" in Section 8 must be rechecked against current prices.
-- Section 7 will get the measured loss and throughput on the actual device.
-- Related work and the results text are separate files and are not drafted yet.
-- XDP support for the on-board driver (macb) was under review upstream in 2026 (netdev, "net: macb: Add XDP support and page pool integration", version 6 of 23 March 2026). State the kernel version in the paper and recheck before submission.
-- The share of records whose opener was not seen, the number of hourly reports, the number of records named through the neighbour table and the number of records still named by IP address at each site belong in the results (they show how much the recorder's measures matter in a real network).
-- The public data keep four behaviours that the recorder no longer has (notes of 19 November 2026 in `docs/method.md`): one flow for all senders of a DHCP request within two minutes, a flow type for a device that received a packet of a protocol without ports and did not answer, a flow type for a device that sent an ICMP error message, and no hourly reports. State them as limits of the public data.
-- Report the results of the primary group by device type and once without IP phones (registered on 19 November 2026): phones choose the ports of every call anew.
-- Full bibliographic entries go into the reference list: Good 1953, Robbins 1968, Chao and Colwell 2017, Ayed and co-authors 2019, Ma and Chao 1993, Lee and Böhme 2026, Calafiore and Campi 2005, Vovk, Gammerman and Shafer 2005, Garwood 1936, Hanley and Lippman-Hand 1983, Clopper and Pearson 1934. The originals of Robbins 1968 and Ma and Chao 1993 were not read in the audit of 24 November 2026 and must be read before submission.
-- Decision pending (24 November 2026): report the alert-day rate under a list that is never updated as a registered secondary metric (`analysis/fixed_list.py`). On the public data GT-C then exceeds the target in 0 to 30 percent of the enforced episodes, not in 0 to 5 percent. Its advantage over a fixed 14-day window then remains at the net level only (0.000 against 0.783 in the homes, 0.300 against 0.671 in UNSW 2016). At the port and svc levels of the homes GT-C is then worse than the fixed window (0.067 against 0.037 and 0.156 against 0.124). The two rules do not enforce the same episodes, so this comparison is not paired.
-- Conventions that the results text must state: role labels use the whole trace (hindsight, the first-week variant is the check), the comparison with the matched quiet streak tunes its length afterwards and uses the type-rate metric, and `GT-max(conf)` is a variant in the stored tables that the text does not use.
-- Two registered sensitivity analyses have no code yet (lists built from types seen on at least two or three days, weekdays only). They must be implemented before the clinical data arrive.
-- The public UNSW traces violate assumption E in part: realised alert days over D(T)/T is above 1 there. Say that the margin and the drift term, not the propositions, carry the rule on those data.
-- The exceedance shares of GT-C rest on few devices in several cells (6 to 32 devices in the UNSW traces). Give the number of devices and the exact limit in every row.
-- IEEE TDSC allows 12 formatted pages including references, and up to 18 against a fee. Plan supplementary material from the start. Computers & Security does not consider submissions with AI or ML as a significant component: say in one plain sentence that no model is trained, and avoid the words learning, training, prequential and conformal where plain words exist.
